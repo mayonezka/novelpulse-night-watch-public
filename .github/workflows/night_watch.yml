@@ -1,0 +1,49 @@
+name: NovelPulse Night-Watch
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/20 * * * *'
+permissions:
+  contents: write
+  actions: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      start: ${{ steps.lease.outputs.start }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: lease
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/cloud_gate.py
+  cashier:
+    needs: check
+    if: needs.check.outputs.start == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: novelpulse-cashier
+      cancel-in-progress: false
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+      CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+      CLOUD_STATE_KEY: ${{ secrets.CLOUD_STATE_KEY }}
+      CLOUD_REPO: ${{ github.repository }}
+      CLOUD_ROLE: cloud
+      NODE_MODE: bot_24x7
+      CLOUD_FAILOVER_ENABLED: 'true'
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-cloud.txt
+      - run: python scripts/run_cloud_night_watch.py
