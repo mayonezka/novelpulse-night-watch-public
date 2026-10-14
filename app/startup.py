@@ -73,10 +73,14 @@ def watchdog_status(root=PROJECT_ROOT):
         ns = {'t':TASK_NS}
         interval = task.findtext('t:Triggers/t:TimeTrigger/t:Repetition/t:Interval', namespaces=ns)
         enabled = task.findtext('t:Settings/t:Enabled', namespaces=ns) != 'false'
-        logon = task.find('t:Triggers/t:LogonTrigger', ns) is not None
+        logon = (task.find('t:Triggers/t:LogonTrigger', ns) is not None and
+                 task.findtext('t:Triggers/t:LogonTrigger/t:Enabled', namespaces=ns) != 'false')
+        timer = task.findtext('t:Triggers/t:TimeTrigger/t:Enabled', namespaces=ns) != 'false'
         args = task.findtext('t:Actions/t:Exec/t:Arguments', namespaces=ns)
+        command = task.findtext('t:Actions/t:Exec/t:Command', namespaces=ns) or ''
         expected = '"' + str(Path(root).resolve() / 'scripts/start_silent.vbs') + '"'
-        return {'active':enabled and logon and interval == 'PT5M' and args == expected,
+        return {'active':enabled and logon and timer and interval == 'PT5M' and args == expected
+                        and Path(command).name.lower() == 'wscript.exe',
                 'name':WATCHDOG,'interval_minutes':5 if interval == 'PT5M' else None}
     except (ET.ParseError, UnicodeError):
         return missing
