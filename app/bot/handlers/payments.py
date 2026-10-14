@@ -105,7 +105,7 @@ async def successful_payment(message: Message, bot: Bot, db: Database, settings:
             payment.total_amount, payment.telegram_payment_charge_id,
         )
     except ValueError:
-        logger.exception("Payment mismatch for user %s, charge %s", message.from_user.id, payment.telegram_payment_charge_id)
+        logger.error("Payment mismatch; inspect private payment records")
         await message.answer("Платёж требует проверки владельцем. Напишите через /paysupport и приложите квитанцию.")
         return
     if inserted:

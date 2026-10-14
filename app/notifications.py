@@ -23,9 +23,9 @@ async def notify_admins(bot, text, *, settings=None, db=None, event_key=None, re
                 try:
                     await db.finish_admin_alert(event_key, admin_id, state)
                 except Exception:
-                    logger.warning('Could not persist failed owner alert for %s', admin_id)
+                    logger.warning('Could not persist failed owner alert receipt')
             result['errors'].append({'admin_id': admin_id, 'state': state, 'reason': type(error).__name__})
-            logger.warning('Owner alert failed for %s: %s', admin_id, type(error).__name__)
+            logger.warning('Owner alert failed: %s', type(error).__name__)
     return result
 
 

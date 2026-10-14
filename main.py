@@ -36,10 +36,19 @@ async def background_autopilot(db, bot, settings):
     await desktop_loop(db, bot, settings)
 
 
+def log_configuration(settings):
+    # Public Actions logs must not reveal IDs when multiple IDs no longer match
+    # GitHub's exact comma-separated secret masking. Keep PC startup diagnostics.
+    if settings.cloud_role == 'cloud':
+        logging.getLogger(__name__).info('ADMIN_IDS configured: %s owners (cloud IDs hidden)', len(settings.admin_ids))
+    else:
+        logging.getLogger(__name__).info("Конфигурация загружена из .env и окружения. ADMIN_IDS=%s", settings.admin_ids)
+    logging.getLogger(__name__).info('NODE_MODE=%s', settings.node_mode)
+
+
 async def run(settings: Settings | None = None, *, cashier_max_seconds: float | None = None) -> None:
     settings = settings or Settings()
-    logging.getLogger(__name__).info("Конфигурация загружена из .env и окружения. ADMIN_IDS=%s", settings.admin_ids)
-    logging.getLogger(__name__).info('NODE_MODE=%s', settings.node_mode)
+    log_configuration(settings)
     db = Database(settings.db_path)
     await db.open()
     manager = None

@@ -143,7 +143,7 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         try:
             await bot.send_message(inviter, "🎉 По вашей ссылке пришёл новый читатель! Вам начислен +1 бесплатный ключ к любой платной главе.")
         except TelegramAPIError:
-            logging.getLogger(__name__).warning("Не удалось уведомить пригласившего %s; ключ сохранён", inviter)
+            logging.getLogger(__name__).warning("Не удалось уведомить пригласившего; ключ сохранён")
     if command.args and re.fullmatch(r"ch_[1-9][0-9]{0,17}", command.args):
         await show_chapter(bot, message.chat.id, message.from_user.id, int(command.args[3:]), db)
     elif command.args and re.fullmatch(r"series_[1-9][0-9]{0,17}", command.args):
