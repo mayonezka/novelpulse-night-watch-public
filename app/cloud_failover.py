@@ -76,7 +76,7 @@ class GitHubState:
                         'X-GitHub-Api-Version':'2022-11-28', 'Cache-Control':'no-cache'}
 
     async def request(self, method, path, **kwargs):
-        response = await self.client.request(method, 'https://api.github.com/repos/'+self.repo+'/'+path,
+        response = await self.client.request(method, 'https://api.github.com/repos/'+self.repo+('/'+path if path else ''),
             headers=self.headers, **kwargs)
         if response.status_code in (409,422):
             raise CASConflict('GitHub compare-and-swap failed')

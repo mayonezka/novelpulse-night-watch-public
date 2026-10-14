@@ -65,7 +65,7 @@ class Settings(PipelineSettings):
     catalog_snapshot_token: SecretStr | None = None
     retention_interval_hours: float = Field(default=1, gt=0, le=8760, allow_inf_nan=False)
     cloud_failover_enabled: bool = False
-    cloud_repo: str = 'mayonezka/novelpulse-night-watch'
+    cloud_repo: str = 'mayonezka/novelpulse-night-watch-public'
     cloud_github_token: SecretStr | None = None
     cloud_state_key: SecretStr | None = None
     cloud_role: Literal['pc', 'cloud'] = 'pc'
