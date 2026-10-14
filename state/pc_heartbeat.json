@@ -1,14 +1,14 @@
 {
   "epoch": "cd2a86bbadb74eb59b2d667fe85327ca",
   "host": "pc",
-  "lease_owner": "pc",
+  "lease_owner": null,
   "pc_runtime": {
     "executable": "pythonw.exe",
     "pid": 44824,
     "watchdog_active": true
   },
-  "phase": "active",
+  "phase": "stopped",
   "previous_cloud_epoch": null,
-  "status": "online",
-  "updated_at": "2026-10-14T20:14:49.458113+00:00"
+  "status": "offline",
+  "updated_at": "2026-10-14T20:16:41.533184+00:00"
 }
