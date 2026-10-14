@@ -6,11 +6,11 @@
   "lease_owner": "pc",
   "pc_runtime": {
     "executable": "pythonw.exe",
-    "pid": 44824,
+    "pid": 53484,
     "watchdog_active": true
   },
-  "phase": "taking_over",
+  "phase": "active",
   "previous_cloud_epoch": "bf4e2c81e695473a8e7b6a3ff6970c04",
   "status": "online",
-  "updated_at": "2026-10-14T20:19:55.033097+00:00"
+  "updated_at": "2026-10-14T20:20:26.236796+00:00"
 }
