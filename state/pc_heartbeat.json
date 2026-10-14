@@ -1,1 +1,9 @@
-{"status": "online", "host": "pc", "lease_owner": "pc", "epoch": "deployment", "phase": "taking_over", "updated_at": "2026-10-14T20:11:55.620277+00:00"}
+{
+  "epoch": "cd2a86bbadb74eb59b2d667fe85327ca",
+  "host": "pc",
+  "lease_owner": "pc",
+  "phase": "taking_over",
+  "previous_cloud_epoch": null,
+  "status": "online",
+  "updated_at": "2026-10-14T20:14:46.075059+00:00"
+}
