@@ -3,14 +3,14 @@
   "cloud_run_id": "38630692958",
   "epoch": "3cda5829342d4514a68eb53dd6310ade",
   "host": "pc",
-  "lease_owner": "pc",
+  "lease_owner": null,
   "pc_runtime": {
     "executable": "pythonw.exe",
     "pid": 53484,
     "watchdog_active": true
   },
-  "phase": "active",
+  "phase": "stopped",
   "previous_cloud_epoch": "bf4e2c81e695473a8e7b6a3ff6970c04",
-  "status": "online",
-  "updated_at": "2026-10-14T20:51:17.409451+00:00"
+  "status": "offline",
+  "updated_at": "2026-10-14T20:58:32.657739+00:00"
 }
