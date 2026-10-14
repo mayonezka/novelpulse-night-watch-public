@@ -13,6 +13,7 @@ import tempfile
 import wave
 from array import array
 from pathlib import Path
+from functools import lru_cache
 
 import edge_tts
 import imageio_ffmpeg
@@ -28,7 +29,8 @@ EPISODE_CTA_PARTS = ('Продолжение истории уже в Телег
                      'просто вбей в поиск Телеграма NovelPulseBot',
                      'или переходи по ссылке в описании канала!')
 EPISODE_CTA = ' '.join(EPISODE_CTA_PARTS)
-RENDERER_VERSION = 2
+RENDERER_VERSION = 3
+LOOP_BRIDGE = 'И всё началось с того, что…'
 
 
 def build_scenes(series: dict, chapters: list[dict]) -> list[str]:
@@ -77,6 +79,7 @@ def build_episode_scenes(series: dict, chapters: list[dict], episode_num: int) -
             hook, first, second, bridge, *EPISODE_CTA_PARTS]
 
 
+@lru_cache(maxsize=64)
 def _font(size: int, bold: bool = False):
     names = (["C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/tahomabd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
              if bold else ["C:/Windows/Fonts/arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"])
@@ -225,83 +228,93 @@ async def _synthesize(script: str, path: Path, *, mock_tts: bool) -> list[dict]:
     return boundaries
 
 
+def build_drama_scenes(series, chapters, episode_num=None):
+    scenes = build_episode_scenes(series, chapters, episode_num) if episode_num else build_scenes(series, chapters)
+    if episode_num:
+        from app.shorts import viral_theme
+        scenes[0] = viral_theme(series)[0][episode_num-1] + '.'
+    # Use an actual free-chapter status/dialogue excerpt; do not invent book quotations.
+    free = [c for c in chapters if c['chapter_num'] <= min(2,series['free_chapters_limit'])]
+    text='\n\n'.join(c['content_text'] for c in free)
+    box=re.search(r'┌[^\n]*Систем[^\n]*\n(.*?)└[^\n]*',text,re.I|re.S)
+    bracket=re.search(r'\[[^\]]*(?:Систем|Статус|Уровень)[^\]]*\]',text,re.I)
+    lines=[p.strip() for p in re.split(r'(?<=[.!?])\s+|\n+',text) if p.strip()]
+    keys=('систем','разлом','врат','класс','навык','смерт','ошибк','ранг','таймер')
+    candidates=[p for p in lines if len(p)<=130 and any(k in p.casefold() for k in keys)]
+    status=(' '.join(box.group(1).replace('│','').split()) if box else bracket.group(0) if bracket else
+            max(candidates,key=lambda p:sum(k in p.casefold() for k in keys)) if candidates else None)
+    if status:
+        excerpt = complete_excerpt(status,100).strip('«»[]')
+        scenes[3 if episode_num else 2] = '«' + excerpt + '»'
+    else:
+        # Branded narrator interjection, explicitly outside the quoted source material.
+        scenes.insert(2, '[NovelPulse: новый мир. Новые правила.]')
+    return [*scenes, LOOP_BRIDGE]
+
+
 async def generate_promo_video(series: dict, chapters: list[dict], bot_username: str,
                                output_path: str | Path, *, mock_tts: bool = False,
-                               episode_num: int | None = None) -> Path:
-    """Real neural speech by default; explicit mock_tts is for isolated offline tests only."""
-    target = Path(output_path).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", bot_username.lstrip("@")):
-        raise ValueError("Некорректное имя Telegram-бота")
-    scenes = build_episode_scenes(series, chapters, episode_num) if episode_num is not None else build_scenes(series, chapters)
-    script = " ".join(scenes)
-    with tempfile.TemporaryDirectory(prefix="video-", dir=target.parent) as directory:
-        work = Path(directory)
-        audio = work / "speech.mp3"
-        boundaries = await asyncio.wait_for(_synthesize(script, audio, mock_tts=mock_tts), timeout=120)
-        decoded = await _ffmpeg("-v", "error", "-i", str(audio), "-f", "f32le", "-ac", "1", "-ar", "24000", "pipe:1")
-        original_duration = len(decoded) / (24000 * 4)
-        if original_duration <= 0:
-            raise RuntimeError("Пустая звуковая дорожка")
-        duration = max(20.0, min(29.5, original_duration))
-        tempo = original_duration / duration
-        if not 0.5 <= tempo <= 2:
-            raise ValueError("Озвучка слишком короткая или длинная для рекламного ролика")
-        starts = [0.0]
-        cursor = 0
-        for scene in scenes[:-1]:
-            cursor += len(scene) + 1
-            if boundaries:
-                # Match the next word's position in the original script, including punctuation.
-                position, found_start = 0, original_duration
-                for boundary in boundaries:
-                    at = script.find(boundary["text"], position)
-                    if at < 0:
-                        continue
-                    position = at + len(boundary["text"])
-                    if at >= cursor:
-                        found_start = boundary["start"]
-                        break
-                starts.append(min(found_start / tempo, duration - 0.05))
-            else:
-                starts.append(duration * cursor / (len(script) + 1))
-        timings = []
-        for i, scene in enumerate(scenes):
-            end = starts[i + 1] if i + 1 < len(scenes) else duration
-            if end <= starts[i]:
-                raise RuntimeError("Некорректные временные метки TTS")
-            layout = await asyncio.to_thread(render_scene, series["title"], scene, bot_username, i + 1, work / f"scene{i}.png",
-                                    EPISODE_LABELS.get(episode_num, ''), len(scenes))
-            timings.append({"start": starts[i], "end": end, "text": scene, **layout})
-        concat = "ffconcat version 1.0\n" + "".join(
-            f"file scene{i}.png\nduration {item['end'] - item['start']:.6f}\n" for i, item in enumerate(timings))
-        concat += f"file scene{len(scenes) - 1}.png\n"
-        (work / "scenes.txt").write_text(concat, encoding="utf-8")
-        rendered = work / "promo.mp4"
-        await _ffmpeg("-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(work / "scenes.txt"),
-                      "-i", str(audio), "-af", f"atempo={tempo:.6f}", "-r", "25", "-c:v", "libx264",
-                      "-preset", "fast", "-crf", "23", "-threads", "2", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                      "-movflags", "+faststart", "-t", f"{duration:.6f}", "-shortest", str(rendered))
-        if rendered.stat().st_size == 0 or b"ftyp" not in rendered.read_bytes()[:32]:
-            raise RuntimeError("ffmpeg не создал корректный контейнер MP4")
-        await _ffmpeg("-v", "error", "-i", str(rendered), "-f", "null", "-")
-        rendered.replace(target)
-        shutil.copyfile(work / "scene0.png", target.with_suffix(".preview.png"))
-        target.with_suffix(".json").write_text(json.dumps({
-            "series_id": series["id"], "title": series["title"], "voice": VOICE, "rate": "+10%",
-            "mock_tts": mock_tts, "duration": duration, "original_audio_duration": original_duration,
-            "tempo": tempo, "width": 720, "height": 1280, "script": script, "scenes": timings,
-            "bot_username": bot_username, "bytes": target.stat().st_size,
-            "episode_num": episode_num, "episode_label": EPISODE_LABELS.get(episode_num, ''),
-            "renderer_version": RENDERER_VERSION,
-            "search_prompt": f"Введи в поиске Telegram: {bot_username.lstrip('@')}",
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+                               episode_num: int | None = None, test_duration: float | None = None) -> Path:
+    """Viral Engine 2.0. No external media survives the temporary render workspace."""
+    from app.voice_drama import segment_drama, synthesize_drama
+    from app.video_motion import fetch_artwork, MotionRenderer, encode_motion, FPS
+    from app.audio_sfx import mix_soundtrack
+    if test_duration is not None and (not mock_tts or not .5 <= test_duration <= 30):
+        raise ValueError('Short test duration requires explicit mock_tts')
+    target=Path(output_path).resolve()
+    target.parent.mkdir(parents=True,exist_ok=True)
+    if not re.fullmatch(r'[A-Za-z0-9_]{5,32}',bot_username.lstrip('@')):
+        raise ValueError('Некорректное имя Telegram-бота')
+    scenes=build_drama_scenes(series,chapters,episode_num)
+    segments=segment_drama(scenes)
+    try:
+        with tempfile.TemporaryDirectory(prefix='video-',dir=target.parent) as directory:
+            work=Path(directory)
+            speech,words,timings,original=await asyncio.wait_for(synthesize_drama(segments,work,_ffmpeg,
+                mock_tts=mock_tts,mock_duration=test_duration or 24),timeout=240)
+            duration=test_duration if test_duration else max(20.0,min(29.5,original))
+            tempo=original/duration
+            if not .5 <= tempo <= 2:
+                raise ValueError('Озвучка выходит за пределы безопасного ускорения; сократите сценарий')
+            for item in words+timings:
+                item['start']/=tempo;item['end']/=tempo
+            # Sample-accurate decoded PCM durations, not MP3 file sizes or text-length guesses.
+            timings[-1]['end']=duration
+            system_starts=[s['start'] for s in timings if s['system']]
+            audio=await mix_soundtrack(speech,work,duration,system_starts,tempo,_ffmpeg)
+            art,sources=await fetch_artwork(series,offline=mock_tts)
+            renderer=MotionRenderer(art,words,timings,duration,series['title'],bot_username,episode_num,font=_font)
+            rendered=work/'promo.mp4'
+            # Shield the thread: cancellation waits until ffmpeg stops before wiping its workspace.
+            task=asyncio.create_task(asyncio.to_thread(encode_motion,renderer,audio,rendered))
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+            if rendered.stat().st_size==0 or b'ftyp' not in rendered.read_bytes()[:32]:
+                raise RuntimeError('Motion encoder did not create an MP4')
+            await _ffmpeg('-v','error','-i',str(rendered),'-f','null','-')
+            rendered.replace(target)
+            metadata={'series_id':series['id'],'title':series['title'],'renderer_version':RENDERER_VERSION,
+                'engine':'Viral Video Engine 2.0','mock_tts':mock_tts,'fps':FPS,'frames':math.ceil(duration*FPS),
+                'width':720,'height':1280,'duration':duration,'original_audio_duration':original,'tempo':tempo,
+                'voices':sorted(set(s['voice'] for s in timings)),'script':' '.join(scenes),'words':words,
+                'scenes':[{**s,'font_size':58,'stroke_width':4} for s in timings],'artwork':sources,
+                'system_chimes':system_starts,'soundtrack':'procedural minor drone -18 dB + impact/HUD/ticks',
+                'loop_bridge':LOOP_BRIDGE,'episode_num':episode_num,'episode_label':EPISODE_LABELS.get(episode_num,''),
+                'search_prompt':f'Вбей в поиске Telegram: {bot_username.lstrip("@")}','bot_username':bot_username,
+                'bytes':target.stat().st_size}
+            target.with_suffix('.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
     return target
 
 
-async def generate_episode_video(series, chapters, bot_username, episode_num, output_path, *, mock_tts=False):
-    return await generate_promo_video(series, chapters, bot_username, output_path,
-                                      mock_tts=mock_tts, episode_num=episode_num)
+async def generate_episode_video(series,chapters,bot_username,episode_num,output_path,*,mock_tts=False,test_duration=None):
+    return await generate_promo_video(series,chapters,bot_username,output_path,mock_tts=mock_tts,
+                                      episode_num=episode_num,test_duration=test_duration)
 
 
 async def _cli(args):

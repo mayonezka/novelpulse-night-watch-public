@@ -49,6 +49,8 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             telegram = next((r for r in receipts if r['provider'] == 'telegram' and r['destination'] == str(settings.channel_id)), None)
             username = (await bot.get_me()).username
             path = await ensure_short_video(db, short, username, root=root)
+            media_info=json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+            report['video_engine']=media_info.get('engine','legacy')
             if not youtube:
                 upload = await upload_short_youtube(db, short_id=short['id'], claimed_short=short, root=root,
                     manage_slot=False, keep_media=True, background=True, settings=settings, rendered_path=path,
@@ -77,7 +79,7 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             report.update(status='uploaded', youtube_url=f'https://www.youtube.com/shorts/{video_id}',
                           video_id=video_id, telegram_message_id=message_id, cleanup=cleanup)
             await db.set_state('last_paired_upload', datetime.now(timezone.utc).isoformat())
-            text = (f"🎬 Опубликован новый Shorts!\n{short['title']}\n\n{report['youtube_url']}\n"
+            text = (f"🎬 Опубликован новый Shorts! {report['video_engine']}\n{short['title']}\n\n{report['youtube_url']}\n"
                     f"📢 Telegram channel message_id: {message_id}\n"
                     f"🧹 Локальный MP4 удалён (на диске: {cleanup['disk']['mp4_count']} MP4)")
             report['admin_alert'] = await notify_admins(bot, text, settings=settings, db=db, event_key=f'paired_upload:{short["id"]}')

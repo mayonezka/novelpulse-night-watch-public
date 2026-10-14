@@ -11,7 +11,7 @@ from app.autopilot import video_ready
 from app.db import Database
 from app.promotional_text import complete_excerpt
 from app.telegraph_seo import bot_link, channel_link
-from app.video_gen import EPISODE_LABELS, build_episode_scenes, generate_episode_video
+from app.video_gen import EPISODE_LABELS, build_episode_scenes, build_drama_scenes, generate_episode_video, RENDERER_VERSION
 
 SHORTS_DIR = Path('data/shorts_queue')
 
@@ -93,8 +93,8 @@ def short_copy(series: dict, episode_num: int, username: str, channel_url: str, 
 
 
 def episode_fingerprint(series, chapters, username, episode_num):
-    value = {'version': 2, 'series_id': series['id'], 'title': series['title'], 'username': username,
-             'episode_num': episode_num, 'scenes': build_episode_scenes(series, chapters, episode_num)}
+    value = {'version': RENDERER_VERSION, 'series_id': series['id'], 'title': series['title'], 'username': username,
+             'episode_num': episode_num, 'scenes': build_drama_scenes(series, chapters, episode_num)}
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
