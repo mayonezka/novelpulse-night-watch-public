@@ -280,7 +280,7 @@ async def generate_promo_video(series: dict, chapters: list[dict], bot_username:
                 item['start']/=tempo;item['end']/=tempo
             # Sample-accurate decoded PCM durations, not MP3 file sizes or text-length guesses.
             timings[-1]['end']=duration
-            system_starts=[s['start'] for s in timings if s['system']]
+            system_starts=[s['start'] for s in timings if s['voice']=='ru-RU-SvetlanaNeural']
             audio=await mix_soundtrack(speech,work,duration,system_starts,tempo,_ffmpeg)
             art,sources=await fetch_artwork(series,offline=mock_tts)
             renderer=MotionRenderer(art,words,timings,duration,series['title'],bot_username,episode_num,font=_font)
