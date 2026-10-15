@@ -269,6 +269,11 @@ MIGRATIONS = (
     ALTER TABLE paywall_views ADD COLUMN peek_used INTEGER NOT NULL DEFAULT 0 CHECK(peek_used IN (0,1));
     DROP TRIGGER IF EXISTS cashier_paywall_views_update;
     """,
+    """
+    ALTER TABLE users ADD COLUMN streak_days INTEGER NOT NULL DEFAULT 0 CHECK(streak_days BETWEEN 0 AND 2);
+    ALTER TABLE users ADD COLUMN last_checkin_date TEXT NOT NULL DEFAULT '';
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    """,
 )
 
 
@@ -316,6 +321,15 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 16:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    if 'streak_days' not in columns:
+                        await self.connection.execute('ALTER TABLE users ADD COLUMN streak_days INTEGER NOT NULL DEFAULT 0 CHECK(streak_days BETWEEN 0 AND 2)')
+                    if 'last_checkin_date' not in columns:
+                        await self.connection.execute("ALTER TABLE users ADD COLUMN last_checkin_date TEXT NOT NULL DEFAULT ''")
+                    await self.connection.execute('DROP TRIGGER IF EXISTS cashier_users_update')
+                    await self.connection.execute(f'PRAGMA user_version = {index + 1}')
+                    continue
                 if index == 15:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(paywall_views)')}
                     if 'peek_used' in columns:
@@ -366,6 +380,37 @@ class Database:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
+
+    @durable_write
+    async def claim_daily_gift(self, tg_id: int, *, now: datetime | None = None) -> dict:
+        """One UTC check-in per reader per date, serialized across connections/nodes."""
+        clock = now or datetime.now(timezone.utc)
+        if clock.tzinfo is None:
+            raise ValueError('Check-in clock must be timezone-aware')
+        today = clock.astimezone(timezone.utc).date()
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                user = await self._one('SELECT * FROM users WHERE tg_id=?', (tg_id,))
+                if user is None:
+                    raise ValueError('Reader must register before checking in')
+                last = user['last_checkin_date']
+                # A future date must not enable duplicate rewards after clock rollback.
+                if last and last >= today.isoformat():
+                    result = {'claimed': False, 'rewarded': False, 'streak_days': user['streak_days']}
+                else:
+                    consecutive = last == (today - timedelta(days=1)).isoformat()
+                    day = user['streak_days'] + 1 if consecutive else 1
+                    reward = day == 3
+                    await self.connection.execute(
+                        'UPDATE users SET streak_days=?,last_checkin_date=?,free_unlock_credits=free_unlock_credits+? WHERE tg_id=?',
+                        (0 if reward else day, today.isoformat(), int(reward), tg_id))
+                    result = {'claimed': True, 'rewarded': reward, 'streak_days': 0 if reward else day}
+                await self.connection.commit()
+                return result
+            except BaseException:
+                await self.connection.rollback()
+                raise
 
     async def _one(self, sql: str, args: tuple = ()) -> dict[str, Any] | None:
         async with self.connection.execute(sql, args) as cursor:

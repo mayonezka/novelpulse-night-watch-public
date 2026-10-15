@@ -192,7 +192,10 @@ async def run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | No
     settings=settings or Settings()
     if settings.cloud_failover_enabled and not settings.autopilot_worker:
         from app.autopilot_process import run_isolated_cycle
-        return await run_isolated_cycle(db,bot,settings,output_dir)
+        try:
+            return await run_isolated_cycle(db,bot,settings,output_dir)
+        finally:
+            await refresh_handoff(db, output_dir)
     directory = Path(output_dir)
     cleanup_root = Path('data') if directory.resolve() == TRAFFIC_DIR.resolve() else directory
     try:
@@ -205,6 +208,18 @@ async def run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | No
         except RuntimeError:
             # Another valid job owns the slot; never remove its active transfer.
             logger.info('Очистка отложена: другой процесс ещё отправляет MP4')
+        finally:
+            await refresh_handoff(db, output_dir)
+
+
+async def refresh_handoff(db, output_dir):
+    """Production updates the root prompt; isolated test DBs never overwrite it."""
+    from app.brain_sync import generate_orchestrator_handoff, ROOT
+    target = None if Path(db.path).resolve().parent == ROOT/'data' else Path(output_dir)/'ORCHESTRATOR_STATE.md'
+    try:
+        await generate_orchestrator_handoff(db, output_path=target)
+    except Exception:
+        logger.exception('Не удалось обновить ORCHESTRATOR_STATE.md')
 
 
 async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> None:
@@ -218,7 +233,8 @@ async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> No
         schedule = await upload_schedule(db, settings)
         if not schedule['due']:
             # One catch-up publication, not a burst for every missed overnight slot.
-            await asyncio.sleep(schedule['seconds_remaining'])
+            # Re-read cooldown/queue every minute; resume at expiry, even after edits.
+            await asyncio.sleep(min(60, schedule['seconds_remaining']))
             continue
         try:
             report = await run_autopilot_cycle(db, bot, settings=settings)
@@ -233,7 +249,7 @@ async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> No
             logger.warning("Автопилот: %s", failure_reason(error))
         schedule = await upload_schedule(db, settings)
         # Failed/empty cycles use the normal interval rather than spinning while overdue.
-        await asyncio.sleep(max(60, schedule['seconds_remaining']) if not schedule['due']
+        await asyncio.sleep(min(60, schedule['seconds_remaining']) if not schedule['due']
                             else settings.autopilot_interval_hours * 3600)
 
 

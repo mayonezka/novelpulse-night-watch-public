@@ -199,8 +199,30 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         await message.answer(WELCOME, reply_markup=keyboard([
             [button("📖 Каталог новелл", "catalog")], [button("👑 Купить VIP-доступ", "vip")],
             [button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
+            [button("🎁 Дар Системы (Стрик)", "daily_gift")],
         ]))
         await show_catalog(bot, message.chat.id, db)
+
+
+async def daily_gift(query: CallbackQuery, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    await db.ensure_user(query.from_user.id, query.from_user.username)
+    result = await db.claim_daily_gift(query.from_user.id)
+    days = result['streak_days']
+    if not result['claimed']:
+        text = (f'⏳ Вы уже забрали сегодняшний дар Системы! Текущий стрик: {days}/3 дн. '
+                'Возвращайтесь завтра!')
+    elif result['rewarded']:
+        text = ('🎉 [СИСТЕМА: НАГРАДА ПОЛУЧЕНА!]\n'
+                'Вы заходили 3 дня подряд и получили +1 🔑 бонусный ключ к любой платной главе!')
+    else:
+        text = (f'⚡ [СИСТЕМА: ЕЖЕДНЕВНАЯ СИНХРОНИЗАЦИЯ {days}/3]\n'
+                f'Ещё {3-days} дн. подряд — и вы получите бесплатный ключ к любой платной главе!\n'
+                '🔥 Не хотите ждать? Откройте продолжение прямо сейчас за 1 ⭐️ '
+                'или возьмите ⚡ VIP на 24 часа (19 ⭐️)!')
+    await query.message.answer(text, reply_markup=keyboard([[button('📖 Каталог новелл', 'catalog')]]))
 
 
 async def myid(message: Message) -> None:
@@ -315,6 +337,7 @@ def create_router() -> Router:
     router.callback_query.filter(F.message.chat.type == "private")
     router.callback_query.register(vip, F.data == "vip")
     router.callback_query.register(referral, F.data == "referral")
+    router.callback_query.register(daily_gift, F.data == "daily_gift")
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
     router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))
     router.callback_query.register(navigate, F.data.regexp(

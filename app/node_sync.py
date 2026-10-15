@@ -43,10 +43,17 @@ class ChapterRecord(Record):
     translation_mode: str
 
 
+class FactoryMetrics(Record):
+    pending: int = Field(ge=0)
+    uploaded: int = Field(ge=0)
+    cooldown_until: str | None
+
+
 class Snapshot(Record):
     version: int = Field(ge=1, le=1)
     generated_at: str
     last_youtube_upload_at: str | None
+    factory_metrics: FactoryMetrics | None = None
     series: list[SeriesRecord] = Field(max_length=10000)
     chapters: list[ChapterRecord] = Field(max_length=100000)
 
@@ -74,12 +81,16 @@ async def export_catalog(db: Database, path: str | Path = 'data/catalog_snapshot
             series = await db._all('SELECT * FROM series ORDER BY id')
             chapters = await db._all('SELECT * FROM chapters WHERE is_published=1 ORDER BY series_id,chapter_num')
             last = await db._one("SELECT value FROM app_state WHERE key='last_youtube_upload_at'")
+            counts = {r['status']: r['count'] for r in await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')}
+            cooldown = await db._one("SELECT value FROM app_state WHERE key='youtube_quota_cooldown_until'")
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
             raise
     snapshot = Snapshot(version=1, generated_at=datetime.now(timezone.utc).isoformat(),
         last_youtube_upload_at=last['value'] if last else None,
+        factory_metrics=FactoryMetrics(pending=counts.get('pending',0), uploaded=counts.get('uploaded',0),
+                                       cooldown_until=cooldown['value'] if cooldown else None),
         series=[SeriesRecord(**s) for s in series], chapters=[ChapterRecord(**c) for c in chapters])
     encoded = snapshot.model_dump_json(indent=2).encode('utf-8')
     if len(encoded) > MAX_SNAPSHOT_BYTES:
@@ -120,7 +131,8 @@ async def import_catalog(db: Database, data: bytes | str) -> dict:
                     raise ValueError(f'Chapter ID collision: {record.id}; purchases must retain their original identity')
                 await _upsert(db, 'chapters', record.model_dump())
             for key, value in [('catalog_snapshot_generated_at', snapshot.generated_at),
-                               ('factory_last_youtube_upload_at', snapshot.last_youtube_upload_at)]:
+                               ('factory_last_youtube_upload_at', snapshot.last_youtube_upload_at),
+                               ('factory_metrics', snapshot.factory_metrics.model_dump_json() if snapshot.factory_metrics else None)]:
                 if value is not None:
                     await db.connection.execute('INSERT INTO app_state(key,value) VALUES (?,?) '
                         'ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, value))

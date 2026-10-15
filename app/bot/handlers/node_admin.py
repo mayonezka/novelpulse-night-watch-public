@@ -95,7 +95,10 @@ async def desktop_only(message: Message, settings: Settings):
 
 
 def create_phone_router():
+    from app.brain_sync import brain_sync
     router = Router(name='phone_admin')
+    router.message.register(brain_sync, Command('brain_sync', 'ceo_brief'), IsAdmin())
+    router.message.register(denied, Command('brain_sync', 'ceo_brief'))
     router.message.register(phone_stats, Command('stats', 'dashboard'), IsAdmin())
     router.message.register(phone_followup, Command('followup_now'), IsAdmin())
     router.message.register(denied, Command('stats', 'dashboard', 'followup_now'))

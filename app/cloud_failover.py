@@ -295,7 +295,10 @@ class CloudFailover:
     async def sync_catalog(self):
         revision=(await self.db._one('SELECT revision FROM catalog_clock WHERE id=1'))['revision']
         stamp=await self.db.get_state('last_youtube_upload_at')
-        if (revision,stamp)==self.last_catalog:
+        counts=await self.db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status ORDER BY status')
+        factory_stamp=(stamp, await self.db.get_state('youtube_quota_cooldown_until'),
+                       tuple((r['status'],r['count']) for r in counts))
+        if (revision,factory_stamp)==self.last_catalog:
             return
         path=Path(self.db.path).parent/'catalog_snapshot.json'
         await export_catalog(self.db,path)
@@ -305,7 +308,7 @@ class CloudFailover:
         existing = open_catalog(remote,self.key)
         if {k:v for k,v in existing.items() if k != 'generated_at'} != {k:v for k,v in catalog.items() if k != 'generated_at'}:
             await self.github.replace(CATALOG,seal_catalog(catalog,self.key))
-        self.last_catalog=(revision,stamp)
+        self.last_catalog=(revision,factory_stamp)
 
     async def wait_cloud_stopped(self):
         """Wait for the cashier checkpoint, not for the warm runner to exit."""

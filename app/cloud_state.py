@@ -112,6 +112,13 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                         and 'peek_used' in columns and set(row) == set(columns) - {'peek_used'})
                     if legacy_peek:
                         row = {**row, 'peek_used': 0}
+                    missing_streak = set()
+                    if table == 'users' and isinstance(row, dict):
+                        defaults = {'streak_days': 0, 'last_checkin_date': ''}
+                        missing_streak = set(columns) - set(row)
+                        if not missing_streak <= defaults.keys():
+                            raise ValueError('Invalid row schema: users')
+                        row = {**row, **{k: defaults[k] for k in missing_streak}}
                     if (not isinstance(row, dict) or set(row) != set(columns) or
                             any(type(v) not in (int, float, str, type(None)) for v in row.values())):
                         raise ValueError(f'Invalid row schema: {table}')
@@ -123,6 +130,9 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                         ' AND '.join(f'{k}=?' for k in pk), identity)
                     if legacy_peek and existing:
                         row['peek_used'] = existing['peek_used']
+                    if missing_streak and existing:
+                        for key in missing_streak:
+                            row[key] = existing[key]
                     if existing == row:
                         continue
                     if table == 'purchases' and existing and any(existing[k] != row[k] for k in

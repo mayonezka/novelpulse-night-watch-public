@@ -13,6 +13,7 @@ from aiogram.types import FSInputFile, InlineKeyboardButton, Message
 from app.bot.handlers.user import keyboard, send_text
 from app.config import Settings
 from app.db import Database
+from app.brain_sync import brain_sync
 from app.pipeline import failure_reason, fetch_trending_royalroad, run_pipeline, royalroad_fiction_url
 from app.promotional_text import complete_excerpt, dramatic_excerpt
 from app.video_gen import generate_promo_video
@@ -526,6 +527,8 @@ async def autopublish_short(message: Message, command: CommandObject, bot: Bot, 
 
 def create_router() -> Router:
     router = Router(name="admin")
+    router.message.register(brain_sync, Command('brain_sync', 'ceo_brief'), IsAdmin())
+    router.message.register(denied, Command('brain_sync', 'ceo_brief'))
     router.message.register(stats, Command("stats"), IsAdmin())
     router.message.register(seed_demo, Command("seed_demo"), IsAdmin())
     router.message.register(promo, Command("promo"), IsAdmin())

@@ -18,38 +18,13 @@ PROFILE = Path('browser_profiles/youtube').resolve()
 NOT_KIDS = 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
 UPLOAD_COMPLETE_PATTERN = re.compile(r'(Загрузка(?: видео)? завершена|Upload complete|Проверка завершена|Checks complete|Обработка завершена)', re.I)
 DAILY_LIMIT_PATTERN=re.compile(r'Загрузка недоступна[\s\S]{0,180}24 час|Daily upload limit|upload this video.{0,50}24 hours',re.I)
-MAX_YOUTUBE_UPLOADS_PER_24H = 4
+from app.scheduling import MAX_YOUTUBE_UPLOADS_PER_24H, youtube_blocked_until
 
 
 class DailyUploadLimit(RuntimeError):
     pass
 
 
-async def youtube_blocked_until(db):
-    now=datetime.now(timezone.utc)
-    active=[]
-    for key in ('youtube_quota_cooldown_until','youtube_upload_blocked_until'):
-        value=await db.get_state(key)
-        if value:
-            try:
-                until=datetime.fromisoformat(value.replace('Z','+00:00'))
-                if until.tzinfo is None:until=until.replace(tzinfo=timezone.utc)
-                if until>now:active.append(until)
-            except ValueError:
-                continue
-    uploads=await db._all("SELECT published_at FROM short_publications WHERE provider='youtube' AND julianday(published_at)>=julianday('now')-1 ORDER BY julianday(published_at)")
-    if len(uploads)>=MAX_YOUTUBE_UPLOADS_PER_24H:
-        oldest=datetime.fromisoformat(uploads[-MAX_YOUTUBE_UPLOADS_PER_24H]['published_at'].replace('Z','+00:00'))
-        if oldest.tzinfo is None:oldest=oldest.replace(tzinfo=timezone.utc)
-        until=oldest+timedelta(hours=24)
-        if until>now:
-            active.append(until)
-    if not active:
-        return None
-    effective=max(active).isoformat()
-    if await db.get_state('youtube_quota_cooldown_until') != effective:
-        await db.set_state('youtube_quota_cooldown_until',effective)
-    return effective
 FIRST_COMMENT=('📖 А как бы вы поступили на месте героя в этот момент? Полные главы на русском языке уже ждут '
     'в нашем Телеграм-боте — просто вбейте в поиске Telegram: NovelPulseBot '
     '(или переходите в канал @novelpulse_litrpg) 🔥')
