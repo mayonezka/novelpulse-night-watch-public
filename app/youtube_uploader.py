@@ -8,6 +8,7 @@ import os
 from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import urlparse
+from datetime import datetime,timedelta,timezone
 
 import httpx
 from playwright.async_api import async_playwright, expect
@@ -16,6 +17,17 @@ CHROME = Path(r'C:\Program Files\Google\Chrome\Application\chrome.exe')
 PROFILE = Path('browser_profiles/youtube').resolve()
 NOT_KIDS = 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
 UPLOAD_COMPLETE_PATTERN = re.compile(r'(Загрузка(?: видео)? завершена|Upload complete|Проверка завершена|Checks complete|Обработка завершена)', re.I)
+DAILY_LIMIT_PATTERN=re.compile(r'Загрузка недоступна[\s\S]{0,180}24 час|Daily upload limit|upload this video.{0,50}24 hours',re.I)
+
+
+class DailyUploadLimit(RuntimeError):
+    pass
+
+
+async def youtube_blocked_until(db):
+    value=await db.get_state('youtube_upload_blocked_until')
+    if value and datetime.fromisoformat(value)>datetime.now(timezone.utc):return value
+    return None
 FIRST_COMMENT=('📖 А как бы вы поступили на месте героя в этот момент? Полные главы на русском языке уже ждут '
     'в нашем Телеграм-боте — просто вбейте в поиске Telegram: NovelPulseBot '
     '(или переходите в канал @novelpulse_litrpg) 🔥')
@@ -223,8 +235,13 @@ async def upload_in_studio(page, path, short, description, *, timeout_seconds=90
     if await fields.nth(0).inner_text() != short['title']:
         raise RuntimeError('YouTube не сохранил точное название')
     await select_not_kids(page)
-    video_link = page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').first
-    await video_link.wait_for(state='visible')
+    video_link = page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').filter(visible=True).first
+    try:
+        await video_link.wait_for(state='visible')
+    except Exception:
+        if await page.get_by_text(DAILY_LIMIT_PATTERN).filter(visible=True).count():
+            raise DailyUploadLimit('YouTube установил суточный лимит: загрузка доступна после проверки канала владельцем или сброса лимита') from None
+        raise
     draft_url = await video_link.get_attribute('href')
     parsed = urlparse(draft_url)
     draft_id = parsed.path.rstrip('/').rsplit('/', 1)[-1]
@@ -283,6 +300,8 @@ async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9
     from app.storage_cleanup import media_slot, delete_video
     from app.pipeline import failure_reason
     root = root or SHORTS_DIR
+    blocked=await youtube_blocked_until(db)
+    if blocked:return {'status':'quota_blocked','retry_after':blocked,'error':'Суточный лимит YouTube: ожидается ручная проверка канала или сброс лимита'}
     submitted = False
     upload_started = False
     draft = None
@@ -347,6 +366,14 @@ async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9
                 comment=await try_first_comment(page,receipt['video_id'],db)
                 return {'status': 'uploaded', 'short_id': short['id'], **receipt, **comment, 'audience_audit': audit,
                         'bytes_deleted': sum(p['bytes'] for p in removed), 'mp4_deleted': sum(p['mp4'] for p in removed)}
+            except DailyUploadLimit as error:
+                until=(datetime.now(timezone.utc)+timedelta(hours=24)).isoformat()
+                await db.set_state('youtube_upload_blocked_until',until)
+                await db.set_state(f'youtube_draft:{short["id"]}',json.dumps({'state':'quota_blocked','retry_after':until}))
+                await db.finish_short(short['id'],'pending')
+                removed=[] if keep_media else delete_video(path,root=root)
+                return {'status':'quota_blocked','short_id':short['id'],'retry_after':until,'error':str(error),
+                    'mp4_deleted':sum(p['mp4'] for p in removed)}
             except Exception as error:
                 row = await db.get_short(short['id'])
                 status = ('uploaded' if row['status'] == 'uploaded' else 'uncertain' if submitted

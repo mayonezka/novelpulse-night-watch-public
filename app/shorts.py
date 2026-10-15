@@ -179,13 +179,21 @@ async def ensure_short_video(db: Database, short: dict, username: str, *, root: 
             await asyncio.sleep(2 ** attempt)
 
 
-async def publish_short_to_channel(db, bot, channel_id, *, short_id=None, root=SHORTS_DIR, min_interval_hours=0):
+async def publish_short_to_channel(db, bot, channel_id, *, short_id=None, root=SHORTS_DIR, min_interval_hours=0,defer_youtube=False):
     from datetime import datetime, timezone
     from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
     from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
     from app.storage_cleanup import media_slot, delete_video
     from app.pipeline import failure_reason
     receipts = await db.short_publications()
+    if defer_youtube and short_id is not None:
+        existing=next((r for r in receipts if r['short_id']==short_id and r['provider']=='telegram' and r['destination']==str(channel_id)),None)
+        if existing:
+            from app.publishing import publish_story_poll
+            poll=await publish_story_poll(db,bot,channel_id,short_id,int(existing['remote_id']))
+            return {'status':'uploaded','short_id':short_id,'message_id':int(existing['remote_id']),
+                'poll':poll,'telegram_poll_message_id':poll.get('message_id'),'queue_status':(await db.get_short(short_id))['status'],
+                'mp4_deleted':0,'bytes_deleted':0,'reused_receipt':True}
     last = [r for r in receipts if r['provider'] == 'telegram' and r['destination'] == str(channel_id)]
     if min_interval_hours and last:
         elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last[-1]['published_at'].replace('Z','+00:00'))).total_seconds()
@@ -205,11 +213,13 @@ async def publish_short_to_channel(db, bot, channel_id, *, short_id=None, root=S
             sent = await bot.send_video(channel_id, FSInputFile(path), caption=caption,
                 parse_mode=None, supports_streaming=True, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text='📖 Читать в боте ➡️', url=bot_link(username, short['series_id']))]]))
-            await db.record_short_publication(short['id'], 'telegram', str(channel_id), str(sent.message_id))
+            await db.record_short_publication(short['id'], 'telegram', str(channel_id), str(sent.message_id),finalize=not defer_youtube)
             removed = delete_video(path, root=root)
             from app.publishing import publish_story_poll
             poll=await publish_story_poll(db,bot,channel_id,short['id'],sent.message_id)
+            if defer_youtube:await db.finish_short(short['id'],'pending')
             return {'status': 'uploaded', 'short_id': short['id'], 'message_id': sent.message_id,
+                    'queue_status':'pending' if defer_youtube else 'uploaded',
                     'poll':poll,'telegram_poll_message_id':poll.get('message_id'),
                     'bytes_deleted': sum(p['bytes'] for p in removed), 'mp4_deleted': sum(p['mp4'] for p in removed)}
         except Exception as error:

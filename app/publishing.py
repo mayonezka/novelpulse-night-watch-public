@@ -39,6 +39,9 @@ async def publish_story_poll(db,bot,channel_id,short_id,video_message_id):
 async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_DIR, min_interval_hours=0):
     if not settings.channel_id:
         raise ValueError('CHANNEL_ID обязателен для публикации в обе площадки')
+    from app.youtube_uploader import youtube_blocked_until
+    blocked=await youtube_blocked_until(db)
+    if blocked:return {'status':'quota_blocked','retry_after':blocked,'reason':'Суточный лимит YouTube; повторная загрузка отложена'}
     root = Path(root).resolve()
     cleanup_root = DATA_DIR if root.is_relative_to(DATA_DIR.resolve()) else root
     async with nullcontext():
