@@ -280,6 +280,7 @@ class CloudFailover:
             self.shutdown_path.unlink(missing_ok=True)
             self._atexit = self.exit_fallback
             atexit.register(self._atexit)
+        await self.db.backfill_player_progress()
         await self.flush(force=True)
         self.ready = True
         self.db.durability_hook = self.flush

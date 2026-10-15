@@ -11,7 +11,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.config import Settings
 from app.db import Database
 from app.text import split_text
-from app.monetization import VIP_PLANS, VIP_LABELS
+from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
+from app.gamification import notify_levelups, status_window
 from app.notifications import notify_admins
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
@@ -117,7 +118,8 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         else:
             await bot.send_message(chat_id, text, parse_mode=None, reply_markup=markup)
         if chat_id == tg_id:
-            await db.record_read(tg_id, chapter["series_id"], chapter["chapter_num"])
+            await db.record_read(tg_id, chapter["series_id"], chapter["chapter_num"],completed=page==len(pages)-1)
+            await notify_levelups(bot,db,tg_id)
     else:
         teaser = deep_peek_excerpt(chapter['content_text']) if deep_peek else chapter["content_text"][:300]
         if not deep_peek and len(chapter["content_text"]) > 300:
@@ -140,7 +142,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         rows.append([button(label, f"buy:{chapter_id}")])
         if credits > 0:
             rows.append([button(f"🔑 Открыть за бонусный ключ (осталось: {credits})", f"credit:{chapter_id}")])
-        rows.extend([[button(VIP_LABELS[days], f'vip:{days}:{price}')] for days, price in VIP_PLANS.items()])
+        rows.extend([[button(label,data)] for label,data in vip_options(account)])
         rows.extend([[button("🎁 Открыть бесплатно за друга", "referral")],
                      [button("👑 Купить VIP-доступ", "vip")], [button("🔙 Назад к каталогу", "catalog")]])
         if deep_peek:
@@ -209,6 +211,7 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
             f"вход: {(command.args or '/start')[:128]}. Всего читателей: {total}",
             settings=settings, db=db, event_key=f'new_reader:{message.from_user.id}')
     if inviter:
+        await notify_levelups(bot,db,inviter)
         try:
             await bot.send_message(inviter, "🎉 По вашей ссылке пришёл новый читатель! Вам начислен +1 бесплатный ключ к любой платной главе.")
         except TelegramAPIError:
@@ -222,16 +225,18 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
             [button("📖 Каталог новелл", "catalog")], [button("👑 Купить VIP-доступ", "vip")],
             [button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
             [button("🎁 Дар Системы (Стрик)", "daily_gift")],
+            [button('👤 Мой Ранг в Системе','profile')],
         ]))
         await show_catalog(bot, message.chat.id, db)
 
 
-async def daily_gift(query: CallbackQuery, db: Database) -> None:
+async def daily_gift(query: CallbackQuery, db: Database, bot: Bot) -> None:
     await query.answer()
     if not isinstance(query.message, Message):
         return
     await db.ensure_user(query.from_user.id, query.from_user.username)
     result = await db.claim_daily_gift(query.from_user.id)
+    await notify_levelups(bot,db,query.from_user.id)
     days = result['streak_days']
     if not result['claimed']:
         text = (f'⏳ Вы уже забрали сегодняшний дар Системы! Текущий стрик: {days}/3 дн. '
@@ -250,6 +255,25 @@ async def daily_gift(query: CallbackQuery, db: Database) -> None:
 async def myid(message: Message) -> None:
     if message.from_user:
         await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
+
+
+async def profile(message: Message, bot: Bot, db: Database) -> None:
+    if not message.from_user:return
+    await db.ensure_user(message.from_user.id,message.from_user.username)
+    await notify_levelups(bot,db,message.from_user.id)
+    user=await db.get_user(message.from_user.id)
+    await message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
+        [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+
+
+async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message,Message):return
+    await db.ensure_user(query.from_user.id,query.from_user.username)
+    await notify_levelups(bot,db,query.from_user.id)
+    user=await db.get_user(query.from_user.id)
+    await query.message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
+        [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
 
 
 async def catalog(message: Message, bot: Bot, db: Database) -> None:
@@ -335,11 +359,11 @@ async def credit_unlock(query: CallbackQuery, bot: Bot, db: Database) -> None:
     await show_chapter(bot, query.message.chat.id, query.from_user.id, chapter_id, db)
 
 
-async def vip(query: CallbackQuery) -> None:
+async def vip(query: CallbackQuery, db: Database) -> None:
     await query.answer()
     if isinstance(query.message, Message):
-        rows = [[button(VIP_LABELS[days], f"vip:{days}:{price}")]
-                for days, price in VIP_PLANS.items()]
+        await db.ensure_user(query.from_user.id,query.from_user.username)
+        rows = [[button(label,data)] for label,data in vip_options(await db.get_user(query.from_user.id))]
         rows.append([button("🔙 Назад к каталогу", "catalog")])
         await query.message.answer(
             "👑 Все миры NovelPulse без ограничений! Выберите VIP-доступ. "
@@ -354,12 +378,14 @@ def create_router() -> Router:
     router.message.register(myid, Command("myid"))
     router.message.register(start, CommandStart(), private)
     router.message.register(catalog, Command("catalog"), private)
+    router.message.register(profile, Command('profile'), private)
     router.message.register(terms, Command("terms"), private)
     router.message.register(payment_support, Command("paysupport", "support"), private)
     router.callback_query.filter(F.message.chat.type == "private")
     router.callback_query.register(vip, F.data == "vip")
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(daily_gift, F.data == "daily_gift")
+    router.callback_query.register(profile_callback, F.data == 'profile')
     router.callback_query.register(listen, F.data.regexp(r'^listen:[1-9][0-9]{0,17}$'))
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
     router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))

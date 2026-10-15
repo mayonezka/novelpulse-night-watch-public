@@ -274,6 +274,19 @@ MIGRATIONS = (
     ALTER TABLE users ADD COLUMN last_checkin_date TEXT NOT NULL DEFAULT '';
     DROP TRIGGER IF EXISTS cashier_users_update;
     """,
+    """
+    CREATE TABLE IF NOT EXISTS xp_events (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    CREATE TABLE IF NOT EXISTS rank_awards (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), rank TEXT NOT NULL,
+        keys_awarded INTEGER NOT NULL DEFAULT 0, notified INTEGER NOT NULL DEFAULT 0 CHECK(notified IN (0,1,2)),
+        PRIMARY KEY(tg_id,rank)
+    );
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    """,
 )
 
 
@@ -321,6 +334,18 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 17:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    for name, definition in (
+                        ('referred_by','INTEGER'),
+                        ('free_unlock_credits','INTEGER NOT NULL DEFAULT 0 CHECK(free_unlock_credits>=0)'),
+                        ('streak_days','INTEGER NOT NULL DEFAULT 0 CHECK(streak_days BETWEEN 0 AND 2)'),
+                        ('last_checkin_date',"TEXT NOT NULL DEFAULT ''"),
+                        ('player_xp','INTEGER NOT NULL DEFAULT 0 CHECK(player_xp>=0)'),
+                        ('player_rank',"TEXT NOT NULL DEFAULT 'F' CHECK(player_rank IN ('F','E','D','C','B','A','S'))"),
+                        ('chapters_read_count','INTEGER NOT NULL DEFAULT 0 CHECK(chapters_read_count>=0)')):
+                        if name not in columns:
+                            await self.connection.execute(f'ALTER TABLE users ADD COLUMN {name} {definition}')
                 if index == 16:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     if 'streak_days' not in columns:
@@ -405,6 +430,7 @@ class Database:
                     await self.connection.execute(
                         'UPDATE users SET streak_days=?,last_checkin_date=?,free_unlock_credits=free_unlock_credits+? WHERE tg_id=?',
                         (0 if reward else day, today.isoformat(), int(reward), tg_id))
+                    await self._award_xp(tg_id, 'checkin:'+today.isoformat(), 'checkin')
                     result = {'claimed': True, 'rewarded': reward, 'streak_days': 0 if reward else day}
                 await self.connection.commit()
                 return result
@@ -420,6 +446,74 @@ class Database:
     async def _all(self, sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         async with self.connection.execute(sql, args) as cursor:
             return [dict(row) for row in await cursor.fetchall()]
+
+    async def _award_xp(self, tg_id: int, key: str, kind: str) -> bool:
+        """Called only within the source event's BEGIN IMMEDIATE transaction."""
+        from app.gamification import XP_EVENTS, RANKS, rank_for_xp
+        amount = XP_EVENTS[kind]
+        cursor = await self.connection.execute('INSERT INTO xp_events(tg_id,event_key,kind,amount) '
+            'VALUES (?,?,?,?) ON CONFLICT(tg_id,event_key) DO NOTHING',(tg_id,key,kind,amount))
+        if cursor.rowcount != 1:return False
+        user = await self._one('SELECT player_xp FROM users WHERE tg_id=?',(tg_id,))
+        xp = user['player_xp']+amount
+        await self.connection.execute('UPDATE users SET player_xp=?,player_rank=?,chapters_read_count=chapters_read_count+? WHERE tg_id=?',
+            (xp,rank_for_xp(xp)['rank'],int(kind=='read'),tg_id))
+        for rank, threshold, _, keys in RANKS[1:]:
+            if xp < threshold:break
+            award = await self.connection.execute('INSERT INTO rank_awards(tg_id,rank,keys_awarded) VALUES (?,?,?) '
+                'ON CONFLICT(tg_id,rank) DO NOTHING',(tg_id,rank,keys))
+            if award.rowcount == 1 and keys:
+                await self.connection.execute('UPDATE users SET free_unlock_credits=free_unlock_credits+? WHERE tg_id=?',(keys,tg_id))
+        return True
+
+    @durable_write
+    async def backfill_player_progress(self) -> int:
+        """Bootstrap each pre-RPG reader once from available legacy progress/receipts."""
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                users = await self._all("SELECT * FROM users u WHERE NOT EXISTS(SELECT 1 FROM xp_events e WHERE e.tg_id=u.tg_id AND e.event_key='bootstrap')")
+                for user in users:
+                    tg_id=user['tg_id']
+                    await self._award_xp(tg_id,'bootstrap','bootstrap')
+                    # Legacy progress stored a high-water mark, not per-chapter receipts.
+                    reads=await self._all('SELECT c.id FROM reading_progress r JOIN chapters c ON c.series_id=r.series_id '
+                        'AND c.chapter_num<=r.chapter_num WHERE r.tg_id=? AND c.is_published=1',(tg_id,))
+                    for row in reads:await self._award_xp(tg_id,f"read:{row['id']}",'read')
+                    payments=await self._all('SELECT id,telegram_payment_charge_id FROM purchases WHERE tg_id=? AND amount_stars>0',(tg_id,))
+                    for row in payments:
+                        await self._award_xp(tg_id,'purchase:'+(row['telegram_payment_charge_id'] or f"legacy:{row['id']}"),'purchase')
+                    referrals=await self._all('SELECT tg_id FROM users WHERE referred_by=?',(tg_id,))
+                    for row in referrals:await self._award_xp(tg_id,f"referral:{row['tg_id']}",'referral')
+                    if user['last_checkin_date']:
+                        await self._award_xp(tg_id,'checkin:'+user['last_checkin_date'],'checkin')
+                await self.connection.commit()
+                return len(users)
+            except BaseException:
+                await self.connection.rollback();raise
+
+    @durable_write
+    async def claim_rank_banners(self, tg_id):
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                rows=await self._all('SELECT * FROM rank_awards WHERE tg_id=? AND notified=0 ORDER BY rowid',(tg_id,))
+                await self.connection.execute('UPDATE rank_awards SET notified=1 WHERE tg_id=? AND notified=0',(tg_id,))
+                await self.connection.commit();return rows
+            except BaseException:
+                await self.connection.rollback();raise
+
+    @durable_write
+    async def finish_rank_banners(self, tg_id, ranks):
+        async with self._lock:
+            await self.connection.executemany('UPDATE rank_awards SET notified=2 WHERE tg_id=? AND rank=? AND notified=1',
+                                            [(tg_id,rank) for rank in ranks])
+
+    async def _validate_vip_discount(self,tg_id,price):
+        if price==9:
+            user=await self._one('SELECT player_xp FROM users WHERE tg_id=?',(tg_id,))
+            if user is None or user['player_xp']<50:
+                raise ValueError('Секретный VIP за 9 ⭐️ доступен с E-ранга (50 XP).')
 
     @durable_write
     async def ensure_user(self, tg_id: int, username: str | None, referred_by: int | None = None, *,
@@ -437,8 +531,10 @@ class Database:
                 else:
                     await self.connection.execute("INSERT INTO users(tg_id, username, referred_by) VALUES (?, ?, ?)",
                                                    (tg_id, username, referred_by if inviter else None))
+                    await self._award_xp(tg_id,'bootstrap','bootstrap')
                 if inviter:
                     await self.connection.execute("UPDATE users SET free_unlock_credits = free_unlock_credits + 1 WHERE tg_id = ?", (referred_by,))
+                    await self._award_xp(referred_by,f'referral:{tg_id}','referral')
                 await self.connection.commit()
                 result = referred_by if inviter else None
                 return (result, existing is None) if registration_details else result
@@ -450,14 +546,24 @@ class Database:
         async with self._lock:
             return await self._one("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
 
-    async def record_read(self, tg_id: int, series_id: int, chapter_num: int) -> None:
+    @durable_write
+    async def record_read(self, tg_id: int, series_id: int, chapter_num: int, *, completed: bool = True) -> None:
         """Called only after an accessible chapter was delivered in a private chat."""
         async with self._lock:
-            await self.connection.execute(
-                "INSERT INTO reading_progress(tg_id, series_id, chapter_num) VALUES (?, ?, ?) "
-                "ON CONFLICT(tg_id, series_id) DO UPDATE SET "
-                "chapter_num = MAX(reading_progress.chapter_num, excluded.chapter_num), "
-                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", (tg_id, series_id, chapter_num))
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                chapter = await self._one('SELECT id FROM chapters WHERE series_id=? AND chapter_num=?',(series_id,chapter_num))
+                if chapter is None or not await self._can_read(tg_id,await self._chapter(chapter['id'])):
+                    raise ValueError('Нельзя начислить XP за недоступную главу')
+                await self.connection.execute(
+                    "INSERT INTO reading_progress(tg_id, series_id, chapter_num) VALUES (?, ?, ?) "
+                    "ON CONFLICT(tg_id, series_id) DO UPDATE SET "
+                    "chapter_num = MAX(reading_progress.chapter_num, excluded.chapter_num), "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", (tg_id, series_id, chapter_num))
+                if completed:await self._award_xp(tg_id,f"read:{chapter['id']}",'read')
+                await self.connection.commit()
+            except BaseException:
+                await self.connection.rollback();raise
 
     async def readers_to_notify(self, series_id: int) -> list[dict[str, Any]]:
         async with self._lock:
@@ -509,10 +615,11 @@ class Database:
 
     @durable_write
     async def prepare_vip_order(self, tg_id: int, payload: str) -> None:
-        parse_vip_payload(payload)
+        _, price = parse_vip_payload(payload)
         async with self._lock:
             await self.connection.execute("BEGIN IMMEDIATE")
             try:
+                await self._validate_vip_discount(tg_id,price)
                 recent = await self._one("SELECT payload FROM vip_orders WHERE tg_id = ? AND payload = ? AND state = 'approved' AND datetime(approved_at) > datetime('now', '-10 minutes')", (tg_id, payload))
                 if recent:
                     raise ValueError("Этот платёж VIP уже обрабатывается. Дождитесь его завершения.")
@@ -532,6 +639,7 @@ class Database:
         async with self._lock:
             await self.connection.execute("BEGIN IMMEDIATE")
             try:
+                await self._validate_vip_discount(tg_id,price)
                 order = await self._one("SELECT * FROM vip_orders WHERE tg_id = ? AND payload = ?", (tg_id, payload))
                 if not order or order["state"] == "paid":
                     raise ValueError("Откройте меню VIP и запросите новый счёт.")
@@ -580,6 +688,7 @@ class Database:
                     "INSERT INTO purchases(tg_id, chapter_id, amount_stars, telegram_payment_charge_id, kind, vip_days, vip_until) VALUES (?, 0, ?, ?, 'vip', ?, ?)",
                     (tg_id, price, charge_id, days, until))
                 await self.connection.execute("UPDATE vip_orders SET state = 'paid' WHERE tg_id = ? AND payload = ?", (tg_id, payload))
+                await self._award_xp(tg_id,'purchase:'+charge_id,'purchase')
                 await self._suppress_paywalls(tg_id)
                 await self.connection.commit()
                 return until, True
@@ -890,6 +999,7 @@ class Database:
                     "VALUES (?, ?, ?, ?)", (tg_id, order["chapter_id"], amount, charge_id),
                 )
                 await self.connection.execute("UPDATE payment_orders SET state = 'paid' WHERE payload = ?", (payload,))
+                await self._award_xp(tg_id,'purchase:'+charge_id,'purchase')
                 await self._suppress_paywalls(tg_id, order["chapter_id"])
                 await self.connection.commit()
                 return order["chapter_id"], True

@@ -87,15 +87,19 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                 return
             dispatcher = create_dispatcher(db, settings)
             dispatcher['cashier_lease'] = manager
+            if manager is None:await db.backfill_player_progress()
             await bot.set_my_commands([
                 BotCommand(command="start", description="Открыть NovelPulse"),
                 BotCommand(command="catalog", description="Каталог новелл"),
+                BotCommand(command="profile", description="Мой Ранг в Системе"),
                 BotCommand(command="myid", description="Узнать свой Telegram ID"),
                 BotCommand(command="terms", description="Условия покупки"),
                 BotCommand(command="paysupport", description="Помощь с оплатой"),
             ])
             await bot.delete_webhook(drop_pending_updates=False)
             tasks=[]
+            from app.gamification import rank_alert_loop
+            tasks.append(asyncio.create_task(rank_alert_loop(db,bot)))
             if settings.node_mode == 'bot_24x7':
                 from app.cashier import background_cashier
                 tasks.append(asyncio.create_task(background_cashier(db, bot, settings)))

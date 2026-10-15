@@ -155,3 +155,35 @@ async def prepare_web_audio_previews(db) -> dict:
             if path is not None:
                 Path(path).unlink(missing_ok=True)
     return {'previews': len(previews)}
+
+
+async def prepare_chapter_audio_previews(db) -> dict:
+    """Short, authorized chapter-specific excerpts; full paid audio stays in the bot."""
+    from app.promotional_text import complete_excerpt
+    previews=json.loads(await db.get_state('chapter_audio_previews') or '{}')
+    rendered=0
+    for series in await db.list_series():
+        for row in await db.list_chapters(series['id']):
+            chapter=await db.get_chapter(row['id']);key=str(chapter['id'])
+            digest=preview_fingerprint(chapter)
+            if previews.get(key,{}).get('source_digest')==digest:continue
+            # Reuse an identical first-chapter preview from Stage 23, where available.
+            books=json.loads(await db.get_state('web_audio_previews') or '{}')
+            book=books.get(str(series['id']),{})
+            if book.get('chapter_id')==chapter['id'] and book.get('source_digest')==digest:
+                previews[key]=book
+            else:
+                snippet=complete_excerpt(chapter['content_text'][:1200],250)
+                path=None
+                try:
+                    path=await render_chapter_audio({**chapter,'content_text':snippet},series)
+                    encoded=base64.b64encode(Path(path).read_bytes()).decode('ascii')
+                    if len(encoded)>350_000:raise ValueError('Слишком большой аудиофрагмент')
+                    previews[key]={'source_digest':digest,'chapter_id':chapter['id'],
+                        'audio_base64':encoded,'transcript':snippet}
+                    rendered+=1
+                finally:
+                    if path is not None:Path(path).unlink(missing_ok=True)
+            await db.set_state('chapter_audio_previews',json.dumps(previews,ensure_ascii=False))
+            print(json.dumps({'chapter_audio_ready':chapter['id'],'cached':len(previews)}),flush=True)
+    return {'previews':len(previews),'rendered':rendered}

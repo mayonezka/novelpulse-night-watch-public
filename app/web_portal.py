@@ -1,4 +1,4 @@
-"""Generate an escaped, self-contained Russian library; no paid text or secrets exported."""
+"""Public library, free chapters and bounded 1200-character chapter landing excerpts."""
 
 import argparse
 import asyncio
@@ -100,12 +100,50 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
     series_list = await db.list_series()
     hubs = json.loads(await db.get_state('seo_hubs') or '[]')
     previews = json.loads(await db.get_state('web_audio_previews') or '{}')
+    chapter_previews=json.loads(await db.get_state('chapter_audio_previews') or '{}')
     cards, files = [], []
     for series in series_list:
         link = bot_link(bot_username, series['id'])
         filename = f"series_{series['id']}.html"
-        chapters = [await db.get_chapter(c['id']) for c in await db.list_chapters(series['id'])
+        published=await db.list_chapters(series['id'])
+        chapters = [await db.get_chapter(c['id']) for c in published
                     if c['chapter_num'] <= min(2, series['free_chapters_limit'])]
+        chapter_links=[]
+        for row in published:
+            chapter=await db.get_chapter(row['id'])
+            chapter_name=f"series_{series['id']}_ch_{chapter['chapter_num']}.html"
+            chapter_url=urljoin(base,chapter_name)
+            direct=f"https://t.me/{bot_username}?start=ch_{chapter['id']}"
+            title=f"{series['title']} — Глава {chapter['chapter_num']}: {chapter['title']} | Читать и слушать онлайн на русском"
+            preview=chapter_previews.get(str(chapter['id']))
+            if preview:
+                audio=audio_preview_html(series,[chapter],{str(series['id']):preview},direct)
+            else:
+                audio=audio_preview_html(series,chapters,previews,direct)
+                audio=audio.replace('Послушайте начало истории','Аудиознакомство с новеллой')
+            excerpt=chapter['content_text'][:1200]
+            graph={'@context':'https://schema.org','@graph':[
+                {'@type':'Chapter','@id':chapter_url+'#chapter','url':chapter_url,'name':title,
+                 'position':chapter['chapter_num'],'inLanguage':'ru','description':excerpt[:250],
+                 'isPartOf':{'@type':'Book','name':series['title'],'url':urljoin(base,filename)},
+                 'potentialAction':{'@type':'ReadAction','target':direct}},
+                {'@type':'BreadcrumbList','itemListElement':[
+                    {'@type':'ListItem','position':1,'name':'Библиотека','item':urljoin(base,'index.html')},
+                    {'@type':'ListItem','position':2,'name':series['title'],'item':urljoin(base,filename)},
+                    {'@type':'ListItem','position':3,'name':f"Глава {chapter['chapter_num']}",'item':chapter_url}]}]}
+            cta=f'<a class="cta" href="{escape(direct)}">📖 Читать продолжение в Telegram-боте (@{escape(bot_username)})</a>'
+            body=(f'<div class="hero"><div class="eyebrow"><a href="index.html">Библиотека</a> / '
+                  f'<a href="{filename}">{escape(series["title"])}</a></div><h1>Глава {chapter["chapter_num"]}: '
+                  f'{escape(chapter["title"])}</h1><p>{escape(series["title"])}</p>{cta}</div>'
+                  f'<article class="reader">{audio}<section class="chapter"><p>{escape(excerpt)}</p>'
+                  '<blockquote>…Система скрывает исход этой сцены. Продолжение уже ждёт в боте.</blockquote>'
+                  f'{cta}<p>🎧 Полная аудиоглава и текст — в Telegram. Первая платная глава: 1 ⭐️; VIP на 24 часа: 19 ⭐️.</p>'
+                  '</section></article>')
+            (directory/chapter_name).write_text(shell(title,excerpt[:300],body,canonical=chapter_url if public else '',
+                channel_url=channel,schema=graph,sticky=f'<aside class="sticky">{cta}</aside>'),encoding='utf-8')
+            files.append(chapter_name)
+            chapter_links.append(f'<li><a href="{chapter_name}">Глава {chapter["chapter_num"]}: {escape(chapter["title"])}</a></li>')
+        chapter_nav='<section class="links"><h2>Все главы: читать и слушать</h2><ol>'+''.join(chapter_links)+'</ol></section>'
         schema = {'@context': 'https://schema.org', '@type': 'Book', 'name': series['title'],
                   'inLanguage': 'ru', 'genre': ['ЛитРПГ', 'Веб-новелла'], 'description': series['description'],
                   'publisher': {'@type': 'Organization', 'name': 'NovelPulse'},
@@ -115,7 +153,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         article = (f'<div class="hero"><div class="eyebrow">Библиотека / ЛитРПГ и новые миры</div>'
                    f'<h1>{escape(series["title"])}</h1><p>{escape(series["description"])}</p>'
                    '<span class="pill">Первые главы бесплатно</span><span class="pill">Перевод на русский</span></div>'
-                   '<article class="reader">' + audio_preview_html(series,chapters,previews,link) + ''.join(chapter_html(c) for c in chapters) +
+                   '<article class="reader">' + chapter_nav + audio_preview_html(series,chapters,previews,link) + ''.join(chapter_html(c) for c in chapters) +
                    f'<div class="links"><h2>История продолжается…</h2><p>Следующая глава уже ждёт в Telegram. '
                    f'Новому читателю первая платная глава — всего 1 ⭐️.</p><a class="cta" href="{link}">Читать дальше в @{escape(bot_username)}</a></div></article>')
         sticky = f'<aside class="sticky"><span>🔥 Первая платная глава — 1 ⭐️<br>👑 VIP на все книги — 49 ⭐️ / 7 дней</span><a class="cta" href="{link}">Открыть продолжение ➡</a></aside>'
@@ -126,6 +164,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         iv = f'<a href="{escape(series["telegraph_url"])}">Instant View ↗</a>' if series['telegraph_url'] else ''
         cards.append(f'<section class="card"><div class="eyebrow">Мир {series["id"]:02d} · Первые главы бесплатно</div>'
                      f'<h2><a href="{filename}">{escape(series["title"])}</a></h2><p>{escape(complete_excerpt(series["description"], 550))}</p>'
+                     f'<details><summary>Главы · {len(published)}</summary><ol>{"".join(chapter_links)}</ol></details>'
                      f'<div class="actions"><a class="cta" href="{link}">Читать в @{escape(bot_username)}</a>{iv}</div></section>')
     hub_links = ''.join(f'<a href="{escape(h["url"])}">{escape(h["title"])} ↗</a>' for h in hubs)
     body = ('<section class="hero"><div class="eyebrow">ЛитРПГ · Исэкай · Система</div>'

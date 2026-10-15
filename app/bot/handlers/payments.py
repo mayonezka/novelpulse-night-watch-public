@@ -11,6 +11,7 @@ from app.db import Database
 from app.monetization import parse_vip_payload, vip_duration
 from app.notifications import revenue_alert
 from app.config import Settings
+from app.gamification import notify_levelups
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ async def successful_payment(message: Message, bot: Bot, db: Database, settings:
             if inserted:
                 days, _ = parse_vip_payload(payment.invoice_payload)
                 await revenue_alert(bot, db, message, payment, f'VIP на {vip_duration(days)}', settings=settings)
+            await notify_levelups(bot,db,message.from_user.id)
             await message.answer(
                 f"👑 VIP {'активирован' if inserted else 'уже оплачен'}! Доступ ко всем опубликованным главам до {expiration}.\n"
                 "Отправляйтесь в новый мир: /catalog"
@@ -112,6 +114,7 @@ async def successful_payment(message: Message, bot: Bot, db: Database, settings:
         chapter = await db.get_chapter(chapter_id, include_unpublished=True)
         await revenue_alert(bot, db, message, payment,
                             f"Глава {chapter['chapter_num']} · {chapter['series_title']}", settings=settings)
+        await notify_levelups(bot,db,message.from_user.id)
         await message.answer("✅ Оплата получена! Глава открыта — приятного чтения!")
     await show_chapter(bot, message.chat.id, message.from_user.id, chapter_id, db, purchased_delivery=True)
 

@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 
 TABLES = ('users', 'payment_orders', 'vip_orders', 'purchases', 'reading_progress',
-          'reader_notifications', 'paywall_views', 'admin_alerts', 'processed_updates')
+          'reader_notifications', 'paywall_views', 'admin_alerts', 'processed_updates', 'xp_events', 'rank_awards')
 
 
 def _fernet(key):
@@ -80,6 +80,10 @@ async def dump_cashier(db, bot_id: int) -> dict:
 
 async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_anchor=False) -> dict:
     """Absolute balances/VIP state are merged once under an exclusive polling lease."""
+    if isinstance(payload.get('tables'),dict):
+        missing=set(TABLES)-set(payload['tables'])
+        if missing and missing <= {'xp_events','rank_awards'}:
+            payload={**payload,'tables':{**payload['tables'],**{name:[] for name in missing}}}
     if (payload.get('version') != 1 or payload.get('bot_id') != bot_id or
             type(payload.get('revision')) is not int or payload['revision'] < 0 or
             set(payload.get('tables', {})) != set(TABLES)):
@@ -114,7 +118,8 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                         row = {**row, 'peek_used': 0}
                     missing_streak = set()
                     if table == 'users' and isinstance(row, dict):
-                        defaults = {'streak_days': 0, 'last_checkin_date': ''}
+                        defaults = {'streak_days': 0, 'last_checkin_date': '',
+                                    'player_xp':0,'player_rank':'F','chapters_read_count':0}
                         missing_streak = set(columns) - set(row)
                         if not missing_streak <= defaults.keys():
                             raise ValueError('Invalid row schema: users')

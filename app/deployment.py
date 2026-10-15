@@ -23,9 +23,12 @@ def message_contains_url(message, url: str) -> bool:
     return url in (message.text or '') or any(getattr(entity, 'url', None) == url for entity in (message.entities or []))
 
 
-def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = ()) -> dict[str, str]:
+def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = (), chapter_pages=()) -> dict[str, str]:
     root = directory.resolve()
-    names = ['index.html', *[f'series_{i}.html' for i in series_ids], 'sitemap.xml', 'robots.txt']
+    for name in chapter_pages:
+        match=re.fullmatch(r'series_([1-9][0-9]*)_ch_([1-9][0-9]*)\.html',name)
+        if not match or int(match[1]) not in series_ids:raise ValueError('Invalid public chapter filename')
+    names = ['index.html', *[f'series_{i}.html' for i in series_ids], *chapter_pages, 'sitemap.xml', 'robots.txt']
     files = {}
     for name in names:
         path = root / name
@@ -55,6 +58,8 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
             'X-GitHub-Api-Version': '2026-03-10', 'User-Agent': 'NovelPulse-PublicLibrary'}) as owned:
             return await deploy_github_pages(db, settings, username, channel, token, client=owned, directory=directory)
     ids = [s['id'] for s in await db.list_series()]
+    chapter_pages=[f"series_{sid}_ch_{c['chapter_num']}.html" for sid in ids for c in await db.list_chapters(sid)]
+    allowed_names={'index.html','sitemap.xml','robots.txt',*[f'series_{sid}.html' for sid in ids],*chapter_pages}
     secret_values = [token, settings.bot_token.get_secret_value(), await db.get_state('telegraph_access_token') or '']
     if settings.llm_api_key:
         secret_values.append(settings.llm_api_key.get_secret_value())
@@ -74,7 +79,7 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
             raise ValueError('Stored repository belongs to another account')
         repo = await github_request(client, 'GET', '/repos/' + full_name)
         tree = await github_request(client, 'GET', f'/repos/{full_name}/git/trees/{repo["default_branch"]}?recursive=1')
-        if tree.get('truncated') or any(n['path'] not in public_static_files(Path(directory), ids) for n in tree['tree']):
+        if tree.get('truncated') or any(n['path'] not in allowed_names for n in tree['tree']):
             raise ValueError('Repository contains unexpected files; deployment stopped')
     else:
         repo = await github_request(client, 'POST', '/user/repos', expected=(201,), json={
@@ -87,9 +92,12 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
         raise ValueError('Dedicated public repository with admin access is required')
     base_url = f'https://{login.lower()}.github.io/{repo["name"]}/'
     await generate_web_portal(db, username, output_dir=directory, base_url=base_url, channel_id=channel)
-    files = public_static_files(Path(directory), ids, secrets=secret_values)
+    files = public_static_files(Path(directory), ids, secrets=secret_values,chapter_pages=chapter_pages)
     branch = repo['default_branch']
+    if len(files)>20:
+        await publish_static_commit(client,full_name,branch,files)
     for name, content in files.items():
+        if len(files)>20:break
         current = await client.get(f'https://api.github.com/repos/{full_name}/contents/{name}', params={'ref': branch})
         payload = {'message': f'Publish public library: {name}', 'content': base64.b64encode(content.encode()).decode(), 'branch': branch}
         if current.status_code == 200:
@@ -116,6 +124,28 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
                  digest=hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest())
     await db.set_state('public_web_deployment', json.dumps(state))
     return state
+
+
+async def publish_static_commit(client, full_name, branch, files):
+    """One branch update/build for the entire verified 50+ page static export."""
+    base='/repos/'+full_name
+    ref=await github_request(client,'GET',base+'/git/ref/heads/'+branch)
+    parent=await github_request(client,'GET',base+'/git/commits/'+ref['object']['sha'])
+    tree=await github_request(client,'GET',base+'/git/trees/'+parent['tree']['sha']+'?recursive=1')
+    old={r['path']:r['sha'] for r in tree['tree'] if r['type']=='blob'}
+    changes=[]
+    for name,content in files.items():
+        data=content.encode('utf-8')
+        digest=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+        if old.get(name)==digest:continue
+        blob=await github_request(client,'POST',base+'/git/blobs',expected=(201,),json={
+            'encoding':'base64','content':base64.b64encode(data).decode()})
+        changes.append({'path':name,'mode':'100644','type':'blob','sha':blob['sha']})
+    if not changes:return
+    newtree=await github_request(client,'POST',base+'/git/trees',expected=(201,),json={'base_tree':parent['tree']['sha'],'tree':changes})
+    commit=await github_request(client,'POST',base+'/git/commits',expected=(201,),json={
+        'message':'Publish chapter SEO library with audio previews','tree':newtree['sha'],'parents':[ref['object']['sha']]})
+    await github_request(client,'PATCH',base+'/git/refs/heads/'+branch,json={'sha':commit['sha'],'force':False})
 
 
 def configure_public_base(url: str, *, env_path='.env') -> str:
