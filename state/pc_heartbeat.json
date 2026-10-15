@@ -1,7 +1,7 @@
 {
   "cloud_lease_until": "2026-10-15T08:38:19.450785+00:00",
   "cloud_run_id": "38683137267",
-  "epoch": "805408f70e2547a1b66f8c3611dd41df",
+  "epoch": "ac5e8633b05a4b3a81e58cd34d7f80e2",
   "host": "pc",
   "lease_owner": "pc",
   "pc_runtime": {
@@ -10,7 +10,7 @@
     "watchdog_active": true
   },
   "phase": "taking_over",
-  "previous_cloud_epoch": "aa89d5639df84c239ee3a4676e909647",
+  "previous_cloud_epoch": null,
   "status": "online",
-  "updated_at": "2026-10-15T08:37:21.672579+00:00"
+  "updated_at": "2026-10-15T08:39:25.614575+00:00"
 }
