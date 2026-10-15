@@ -232,6 +232,39 @@ MIGRATIONS = (
     CREATE TABLE IF NOT EXISTS catalog_clock(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0);
     INSERT INTO catalog_clock(id,revision) VALUES(1,0) ON CONFLICT(id) DO NOTHING;
     """,
+    """
+    CREATE TABLE purchases_stage19 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        chapter_id INTEGER NOT NULL,
+        amount_stars INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        telegram_payment_charge_id TEXT,
+        kind TEXT NOT NULL DEFAULT 'chapter' CHECK(kind IN ('chapter', 'vip', 'bonus')),
+        vip_days INTEGER,
+        vip_until TEXT,
+        chapter_ref INTEGER GENERATED ALWAYS AS (NULLIF(chapter_id, 0)) VIRTUAL REFERENCES chapters(id),
+        CHECK((kind = 'vip' AND chapter_id = 0 AND amount_stars > 0 AND vip_days IN (1, 7, 30))
+           OR (kind = 'chapter' AND chapter_id > 0 AND amount_stars > 0)
+           OR (kind = 'bonus' AND chapter_id > 0 AND amount_stars = 0))
+    );
+    INSERT INTO purchases_stage19(id,tg_id,chapter_id,amount_stars,created_at,telegram_payment_charge_id,kind,vip_days,vip_until)
+        SELECT id,tg_id,chapter_id,amount_stars,created_at,telegram_payment_charge_id,kind,vip_days,vip_until FROM purchases;
+    DROP TABLE purchases;
+    ALTER TABLE purchases_stage19 RENAME TO purchases;
+    CREATE INDEX purchases_user_chapter ON purchases(tg_id, chapter_id);
+    CREATE INDEX purchases_created_at ON purchases(created_at);
+    CREATE UNIQUE INDEX purchases_charge ON purchases(telegram_payment_charge_id);
+    CREATE TABLE short_story_polls (
+        short_id INTEGER NOT NULL REFERENCES shorts_queue(id),
+        destination TEXT NOT NULL,
+        video_message_id INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('sending','sent','failed','uncertain')),
+        message_id INTEGER,
+        error_class TEXT,
+        PRIMARY KEY(short_id,destination)
+    );
+    """,
 )
 
 
@@ -1020,6 +1053,28 @@ class Database:
     async def short_publications(self) -> list[dict]:
         async with self._lock:
             return await self._all('SELECT * FROM short_publications ORDER BY published_at')
+
+    async def claim_story_poll(self, short_id: int, destination: str, video_message_id: int) -> bool:
+        async with self._lock:
+            cursor=await self.connection.execute(
+                "INSERT INTO short_story_polls(short_id,destination,video_message_id,state) VALUES (?,?,?,'sending') "
+                "ON CONFLICT(short_id,destination) DO UPDATE SET state='sending',error_class=NULL "
+                "WHERE short_story_polls.state='failed' AND short_story_polls.video_message_id=excluded.video_message_id",
+                (short_id,str(destination),video_message_id))
+            return cursor.rowcount==1
+
+    async def story_poll(self, short_id: int, destination: str) -> dict | None:
+        async with self._lock:
+            return await self._one('SELECT * FROM short_story_polls WHERE short_id=? AND destination=?',
+                (short_id,str(destination)))
+
+    async def finish_story_poll(self, short_id: int, destination: str, state: str,
+                                message_id: int | None = None, error_class: str | None = None) -> None:
+        if state not in ('sent','failed','uncertain'):raise ValueError('Invalid poll receipt state')
+        async with self._lock:
+            await self.connection.execute('UPDATE short_story_polls SET state=?,message_id=?,error_class=? '
+                "WHERE short_id=? AND destination=? AND state='sending'",
+                (state,message_id,error_class,short_id,str(destination)))
 
     async def claim_admin_alert(self, key, admin_id, text, *, retry_failed=False):
         async with self._lock:

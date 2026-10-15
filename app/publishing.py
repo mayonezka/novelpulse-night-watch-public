@@ -4,13 +4,36 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, InputPollOption, ReplyParameters
 from app.shorts import SHORTS_DIR, ensure_short_video
 from app.storage_cleanup import DATA_DIR, media_slot, enforce_zero_mp4_clutter
 from app.youtube_uploader import upload_short_youtube, reconcile_youtube_publication
 from app.notifications import notify_admins
 from app.telegraph_seo import bot_link
 from app.pipeline import failure_reason
+
+STORY_QUESTION='⚔️ А как бы вы поступили на месте героя в этой главе?'
+STORY_OPTIONS=(
+    '🔥 Рискнуть всем и принять скрытое задание Системы',
+    '🛡 Скрыть свой истинный ранг и изучить уязвимость',
+    '📖 Сразу открыть следующую главу в @NovelPulseBot',
+)
+
+
+async def publish_story_poll(db,bot,channel_id,short_id,video_message_id):
+    """One native anonymous reply. Never retry a network-ambiguous submission."""
+    destination=str(channel_id)
+    if not await db.claim_story_poll(short_id,destination,video_message_id):
+        return await db.story_poll(short_id,destination)
+    try:
+        message=await bot.send_poll(channel_id,question=STORY_QUESTION,
+            options=[InputPollOption(text=text) for text in STORY_OPTIONS],is_anonymous=True,
+            reply_parameters=ReplyParameters(message_id=video_message_id,allow_sending_without_reply=False))
+        await db.finish_story_poll(short_id,destination,'sent',message.message_id)
+    except Exception as error:
+        state='failed' if isinstance(error,TelegramAPIError) and not isinstance(error,TelegramNetworkError) else 'uncertain'
+        await db.finish_story_poll(short_id,destination,state,error_class=type(error).__name__)
+    return await db.story_poll(short_id,destination)
 
 
 async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_DIR, min_interval_hours=0):
@@ -76,14 +99,17 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
                 await db.record_short_publication(short['id'], 'telegram', str(settings.channel_id), str(message_id))
             # End of both transfers: deleting earlier would force a second render.
             cleanup = enforce_zero_mp4_clutter(cleanup_root)
+            poll=await publish_story_poll(db,bot,settings.channel_id,short['id'],message_id)
             report.update(status='uploaded', youtube_url=f'https://www.youtube.com/shorts/{video_id}',
-                          video_id=video_id, telegram_message_id=message_id, cleanup=cleanup)
+                          video_id=video_id, telegram_message_id=message_id, cleanup=cleanup,
+                          poll=poll,telegram_poll_message_id=poll.get('message_id'))
             comment=json.loads(await db.get_state('youtube_comment:'+video_id) or '{}')
             report.update(comment_posted=bool(comment.get('comment_posted')),
                           comment_status=comment.get('comment_status','not_attempted'))
             await db.set_state('last_paired_upload', datetime.now(timezone.utc).isoformat())
             text = (f"🎬 Опубликован новый Shorts! {report['video_engine']}\n{short['title']}\n\n{report['youtube_url']}\n"
                     f"📢 Telegram channel message_id: {message_id}\n"
+                    f"🗳 Опрос: message_id={poll.get('message_id') or 'не подтверждён'} ({poll['state']})\n"
                     f"💬 Первый комментарий: {'опубликован' if report['comment_posted'] else 'не подтверждён'} ({report['comment_status']})\n"
                     f"🧹 Локальный MP4 удалён (на диске: {cleanup['disk']['mp4_count']} MP4)")
             if settings.autopilot_worker:

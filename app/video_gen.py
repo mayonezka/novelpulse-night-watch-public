@@ -29,7 +29,7 @@ EPISODE_CTA_PARTS = ('Продолжение истории уже в Телег
                      'просто вбей в поиск Телеграма NovelPulseBot',
                      'или переходи по ссылке в описании канала!')
 EPISODE_CTA = ' '.join(EPISODE_CTA_PARTS)
-RENDERER_VERSION = 4
+RENDERER_VERSION = 5
 LOOP_BRIDGE = 'И всё началось с того, что…'
 
 
@@ -38,7 +38,8 @@ def build_scenes(series: dict, chapters: list[dict]) -> list[str]:
                   key=lambda c: c["chapter_num"])
     if not free:
         raise ValueError("Для видео нужна опубликованная бесплатная глава")
-    return [f"{complete_excerpt(series['title'], 95)}. Один выбор изменит всё.",
+    from app.shorts import shock_hook
+    return [shock_hook(series),
             dramatic_excerpt(free[0]["content_text"], 125),
             dramatic_excerpt(free[-1]["content_text"], 125),
             "Чем закончится история?",
@@ -52,9 +53,6 @@ def build_episode_scenes(series: dict, chapters: list[dict], episode_num: int) -
                   key=lambda c: c['chapter_num'])
     if not free:
         raise ValueError('Для сериала нужна бесплатная глава')
-    spoken_title = re.split(r'\s*[\[(]', series['title'], maxsplit=1)[0].strip()
-    if len(spoken_title) > 65:
-        spoken_title = re.split(r'\s*[:—]\s*', spoken_title, maxsplit=1)[0].strip()
     opening = re.split(r'\n\s*\n', free[0]['content_text'])[0]
     last_paragraphs = [p.strip() for p in re.split(r'\n\s*\n', free[-1]['content_text']) if p.strip()]
     if episode_num == 1:
@@ -75,7 +73,8 @@ def build_episode_scenes(series: dict, chapters: list[dict], episode_num: int) -
         third = next((c for c in chapters if c['chapter_num'] == 3), None)
         second = dramatic_excerpt(third['content_text'][:300], 78) if third else dramatic_excerpt(free[-1]['content_text'], 78)
         bridge = 'Сможет ли герой выжить? Первую платную главу открой всего за одну звезду.'
-    return [f"{complete_excerpt(spoken_title, 65)}. {EPISODE_LABELS[episode_num]}.",
+    from app.shorts import shock_hook
+    return [shock_hook(series,episode_num),
             hook, first, second, bridge, *EPISODE_CTA_PARTS]
 
 
@@ -230,9 +229,6 @@ async def _synthesize(script: str, path: Path, *, mock_tts: bool) -> list[dict]:
 
 def build_drama_scenes(series, chapters, episode_num=None):
     scenes = build_episode_scenes(series, chapters, episode_num) if episode_num else build_scenes(series, chapters)
-    if episode_num:
-        from app.shorts import viral_theme
-        scenes[0] = viral_theme(series)[0][episode_num-1] + '.'
     # Use an actual free-chapter status/dialogue excerpt; do not invent book quotations.
     free = [c for c in chapters if c['chapter_num'] <= min(2,series['free_chapters_limit'])]
     text='\n\n'.join(c['content_text'] for c in free)
@@ -301,6 +297,8 @@ async def generate_promo_video(series: dict, chapters: list[dict], bot_username:
                 'width':720,'height':1280,'duration':duration,'original_audio_duration':original,'tempo':tempo,
                 'voices':sorted(set(s['voice'] for s in timings)),'script':' '.join(scenes),'words':words,
                 'hud':'live countdown + 0..99% sync + S-class threat badges','parallax_layers':3,
+                'spoken_hook':scenes[0],'first_word_at_seconds':words[0]['start'],
+                'speech_onset_seconds':timings[0].get('speech_onset_seconds',0)/tempo,
                 'scenes':[{**s,'font_size':58,'stroke_width':4} for s in timings],'artwork':sources,
                 'system_chimes':system_starts,'soundtrack':'procedural minor drone -18 dB + impact/HUD/ticks',
                 'loop_bridge':LOOP_BRIDGE,'episode_num':episode_num,'episode_label':EPISODE_LABELS.get(episode_num,''),

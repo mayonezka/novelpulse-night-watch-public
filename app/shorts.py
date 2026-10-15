@@ -16,6 +16,22 @@ from app.video_gen import EPISODE_LABELS, build_episode_scenes, build_drama_scen
 SHORTS_DIR = Path('data/shorts_queue')
 
 
+def shock_hook(series: dict, episode_num: int = 1) -> str:
+    """Narrator copy only; formal titles/episode labels are never spoken as an intro."""
+    title=series['title'].casefold()
+    if 'приручения' in title or 'самозанятый' in title:
+        return 'Что делать, если Система выдала тебе ошейник питомца вместо оружия?!'
+    if 'изменённом мире' in title or 'измененном мире' in title:
+        return 'Тысячу людей выбросило в разлом, но правила выживания знают только единицы!'
+    if 'рельсотрон' in title:
+        return 'Пятилетний сирота соединил магию молний с физикой и собрал рельсотрон!'
+    if 'садовниц' in title:
+        return 'Она вырастила траву — и получила награду Системы! Что скрывает этот сад?!'
+    if 'нулевого ранга' in title or 'нулевой ранг' in title:
+        return 'Ему дали нулевой ранг — почему же Система боится его пробуждения?!'
+    return 'Система предложила награду — но ценой ошибки станет твоя жизнь!'
+
+
 def viral_theme(series: dict) -> tuple[tuple[str, str, str], str]:
     title = series['title'].casefold()
     if 'нулевого ранга' in title or 'нулевой ранг' in title:
@@ -84,7 +100,7 @@ def short_copy(series: dict, episode_num: int, username: str, channel_url: str, 
     title = viral_filename(series, episode_num)[:-4]
     description = (f"📚 {series['title']}\n{EPISODE_LABELS[episode_num]} — история продолжается в NovelPulse.\n\n"
                    "Первые две главы бесплатно. Первая платная глава новому читателю — 1 ⭐️.\n"
-                   "👑 VIP на 7 дней — 49 ⭐️: все главы всех новелл.\n\n"
+                   "⚡ VIP на 24 часа — 19 ⭐️ · 👑 VIP на 7 дней — 49 ⭐️: все книги.\n\n"
                    f"📖 Читать: {bot_link(username, series['id'])}\n"
                    + (f"📢 Канал: {channel_url}\n" if channel_url else '')
                    + (f"🌐 Библиотека: {portal_url}\n" if portal_url else '')

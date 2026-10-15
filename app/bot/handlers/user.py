@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.config import Settings
 from app.db import Database
 from app.text import split_text
-from app.monetization import VIP_PLANS
+from app.monetization import VIP_PLANS, VIP_LABELS
 from app.notifications import notify_admins
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
@@ -119,6 +119,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         rows = [[button(label, f"buy:{chapter_id}")]]
         if credits > 0:
             rows.append([button(f"🔑 Открыть за бонусный ключ (осталось: {credits})", f"credit:{chapter_id}")])
+        rows.extend([[button(VIP_LABELS[days], f'vip:{days}:{price}')] for days, price in VIP_PLANS.items()])
         rows.extend([[button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
                      [button("👑 Купить VIP-доступ", "vip")], [button("🔙 Назад к каталогу", "catalog")]])
         await send_text(bot, chat_id, heading + teaser + banner +
@@ -189,7 +190,7 @@ async def terms(message: Message) -> None:
     await message.answer(
         "📜 Условия NovelPulse\n\nПокупка открывает указанную главу для вашего Telegram-аккаунта. "
         "Полная цена в Stars указана в счёте; автоматических списаний нет. "
-        "VIP на 7 дней стоит 49 Stars, на 30 дней — 149 Stars; повторная покупка продлевает срок. "
+        "VIP на 24 часа стоит 19 Stars, на 7 дней — 49 Stars, на 30 дней — 149 Stars; повторная покупка продлевает срок. "
         "Покупка VIP также означает согласие с этими условиями. Бонусный ключ открывает одну платную главу навсегда. "
         "Первые бесплатные главы и главы при действующем VIP доступны без оплаты. "
         "Нажимая «Открыть главу», вы принимаете эти условия. "
@@ -247,7 +248,7 @@ async def credit_unlock(query: CallbackQuery, bot: Bot, db: Database) -> None:
 async def vip(query: CallbackQuery) -> None:
     await query.answer()
     if isinstance(query.message, Message):
-        rows = [[button(f"👑 VIP на {days} дней — {price} ⭐️", f"vip:{days}:{price}")]
+        rows = [[button(VIP_LABELS[days], f"vip:{days}:{price}")]
                 for days, price in VIP_PLANS.items()]
         rows.append([button("🔙 Назад к каталогу", "catalog")])
         await query.message.answer(

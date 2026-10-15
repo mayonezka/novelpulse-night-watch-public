@@ -141,9 +141,10 @@ class MotionRenderer:
         d=ImageDraw.Draw(self.chrome)
         self.episode=episode or 1
         self.magic,self.bokeh,self.vignette=shader_layers()
-        from app.video_gen import _wrap,short_visual_hook
-        for i,line in enumerate(_wrap(d,short_visual_hook(title),font(32,True),620)):
-            d.text((42,270+i*43),line,font=font(32,True),fill='#FFD700',stroke_width=3,stroke_fill='black')
+        from app.video_gen import _wrap
+        from app.promotional_text import complete_excerpt
+        for i,line in enumerate(_wrap(d,complete_excerpt(title,80),font(25,True),620)[:2]):
+            d.text((42,270+i*33),line,font=font(25,True),fill='#FFD700',stroke_width=2,stroke_fill='black')
         d.rounded_rectangle((26,1000,694,1218),28,fill=(255,216,40,255),outline='white',width=4)
         d.ellipse((52,1034,84,1066),outline=(10,15,26),width=5)
         d.line((78,1062,94,1077),fill=(10,15,26),width=5)

@@ -11,6 +11,19 @@ NARRATOR='ru-RU-DmitryNeural'
 SYSTEM='ru-RU-SvetlanaNeural'
 
 
+def trim_initial_silence(clip,events):
+    """24kHz mono s16le: remove codec/TTS pre-roll, keeping a 2ms consonant lead-in."""
+    samples=array('h');samples.frombytes(clip)
+    if samples.itemsize!=2:raise RuntimeError('Expected 16-bit PCM')
+    first=next((i for i,value in enumerate(samples) if abs(value)>=120),None)
+    if first is None:raise RuntimeError('Neural hook contains no audible speech')
+    cut=max(0,first-48)
+    shifted=[{**e,'start':max(0,e['start']-cut/24000),'end':max(.001,e['end']-cut/24000)} for e in events]
+    # First word is visible in the first frame, with the opening impact, not after a title card.
+    shifted[0]['start']=0.0
+    return samples[cut:].tobytes(),shifted,(first-cut)/24000,cut/24000
+
+
 def segment_drama(scenes):
     segments=[]
     for scene in scenes:
@@ -73,6 +86,7 @@ async def synthesize_drama(segments,directory,ffmpeg,*,mock_tts=False,mock_durat
     timings=[]
     total_words=sum(len(s['text'].split()) for s in segments)
     for index,segment in enumerate(segments):
+        onset,trimmed=0.0,0.0
         start=len(pcm)/48000
         if mock_tts:
             duration=mock_duration*len(segment['text'].split())/max(1,total_words)
@@ -85,11 +99,13 @@ async def synthesize_drama(segments,directory,ffmpeg,*,mock_tts=False,mock_durat
             path=root/f'voice{index}.mp3'
             events=await neural_clip(segment,path)
             clip=await ffmpeg('-v','error','-i',str(path),'-f','s16le','-ac','1','-ar','24000','pipe:1')
+            if index==0:clip,events,onset,trimmed=trim_initial_silence(clip,events)
         pcm.extend(clip)
         end=len(pcm)/48000
         if end<=start:
             raise RuntimeError('Empty neural speech segment')
-        timings.append({**segment,'start':start,'end':end})
+        timings.append({**segment,'start':start,'end':end,'speech_onset_seconds':onset,
+                        'leading_trim_seconds':trimmed})
         for e in events:
             a=max(start,min(end-.001,start+e['start']))
             b=max(a+.001,min(end,start+e['end']))

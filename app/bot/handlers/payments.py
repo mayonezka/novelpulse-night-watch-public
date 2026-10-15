@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 
 from app.bot.handlers.user import show_chapter
 from app.db import Database
-from app.monetization import parse_vip_payload
+from app.monetization import parse_vip_payload, vip_duration
 from app.notifications import revenue_alert
 from app.config import Settings
 
@@ -57,10 +57,10 @@ async def buy_vip(query: CallbackQuery, bot: Bot, db: Database) -> None:
         await query.message.answer(str(error))
         return
     await bot.send_invoice(
-        chat_id=query.from_user.id, title=f"VIP на {days} дней",
-        description=f"Все опубликованные главы NovelPulse на {days} дней. Действующий VIP продлевается. Разовая покупка без автосписаний. Условия: /terms.",
+        chat_id=query.from_user.id, title=f"VIP на {vip_duration(days)}",
+        description=f"Все опубликованные главы NovelPulse на {vip_duration(days)}. Действующий VIP продлевается. Разовая покупка без автосписаний. Условия: /terms.",
         payload=query.data, provider_token="", currency="XTR",
-        prices=[LabeledPrice(label=f"VIP на {days} дней", amount=price)], start_parameter="vip",
+        prices=[LabeledPrice(label=f"VIP на {vip_duration(days)}", amount=price)], start_parameter="vip",
     )
 
 
@@ -94,7 +94,7 @@ async def successful_payment(message: Message, bot: Bot, db: Database, settings:
             expiration = datetime.fromisoformat(until.replace("Z", "+00:00")).astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
             if inserted:
                 days, _ = parse_vip_payload(payment.invoice_payload)
-                await revenue_alert(bot, db, message, payment, f'VIP на {days} дней', settings=settings)
+                await revenue_alert(bot, db, message, payment, f'VIP на {vip_duration(days)}', settings=settings)
             await message.answer(
                 f"👑 VIP {'активирован' if inserted else 'уже оплачен'}! Доступ ко всем опубликованным главам до {expiration}.\n"
                 "Отправляйтесь в новый мир: /catalog"
