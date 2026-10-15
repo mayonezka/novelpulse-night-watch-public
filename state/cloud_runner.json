@@ -1,10 +1,10 @@
 {
-  "active_epoch": null,
+  "active_epoch": "e3496705f2b44a499ccdeed0f31d6eb1",
   "drained_epoch": null,
-  "mode": "ACQUIRING",
+  "mode": "ACTIVE_CASHIER",
   "pc_lease_seconds": 120,
   "poll_seconds": 20,
   "protocol": 17,
   "run_id": "38803657802",
-  "updated_at": "2026-10-15T20:41:22.983871+00:00"
+  "updated_at": "2026-10-15T20:41:29.869782+00:00"
 }
