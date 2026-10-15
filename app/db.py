@@ -255,7 +255,7 @@ MIGRATIONS = (
     CREATE INDEX purchases_user_chapter ON purchases(tg_id, chapter_id);
     CREATE INDEX purchases_created_at ON purchases(created_at);
     CREATE UNIQUE INDEX purchases_charge ON purchases(telegram_payment_charge_id);
-    CREATE TABLE short_story_polls (
+    CREATE TABLE IF NOT EXISTS short_story_polls (
         short_id INTEGER NOT NULL REFERENCES shorts_queue(id),
         destination TEXT NOT NULL,
         video_message_id INTEGER NOT NULL,
