@@ -16,9 +16,17 @@ from app.monetization import parse_vip_payload
 def durable_write(method):
     @wraps(method)
     async def invoke(self, *args, **kwargs):
+        before=None
+        if self.durability_hook is not None:
+            # Read a committed baseline, never another coroutine's uncommitted clock.
+            async with self._lock:
+                before=(await self._one('SELECT revision FROM cashier_clock WHERE id=1'))['revision']
         result = await method(self, *args, **kwargs)
         if self.durability_hook is not None:
-            await self.durability_hook()
+            async with self._lock:
+                after=(await self._one('SELECT revision FROM cashier_clock WHERE id=1'))['revision']
+            if before is None or after!=before:
+                await self.durability_hook()
         return result
     return invoke
 

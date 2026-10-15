@@ -78,7 +78,7 @@ async def dump_cashier(db, bot_id: int) -> dict:
             'created_at': datetime.now(timezone.utc).isoformat(), 'tables': tables}
 
 
-async def merge_cashier(db, payload: dict, bot_id: int) -> dict:
+async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_anchor=False) -> dict:
     """Absolute balances/VIP state are merged once under an exclusive polling lease."""
     if (payload.get('version') != 1 or payload.get('bot_id') != bot_id or
             type(payload.get('revision')) is not int or payload['revision'] < 0 or
@@ -89,7 +89,13 @@ async def merge_cashier(db, payload: dict, bot_id: int) -> dict:
         await db.connection.execute('BEGIN IMMEDIATE')
         try:
             local = (await db._one('SELECT revision FROM cashier_clock WHERE id=1'))['revision']
-            if payload['revision'] < local:
+            if restore_durable_anchor:
+                # Only a previously authenticated GitHub-committed local anchor may use
+                # this path. Drop unacknowledged writes before importing the new owner.
+                await db.connection.execute('PRAGMA defer_foreign_keys=ON')
+                for table in reversed(TABLES):
+                    await db.connection.execute(f'DELETE FROM {table}')
+            if payload['revision'] < local and not restore_durable_anchor:
                 raise ValueError('Refusing older cashier state; local data has not been synchronized')
             for table in TABLES:
                 info = await db._all(f'PRAGMA table_info({table})')

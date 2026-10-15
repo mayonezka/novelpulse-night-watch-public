@@ -165,7 +165,21 @@ class CloudFailover:
 
     async def pull_cashier(self):
         envelope, _ = await self.github.read(DELTA)
-        result = await merge_cashier(self.db,open_state(envelope,self.key),self.bot_id)
+        payload=open_state(envelope,self.key)
+        if payload.get('bot_id')!=self.bot_id:
+            raise ValueError('Checkpoint belongs to a different bot')
+        stored=await self.db.get_state('cashier_durable_anchor')
+        if stored:
+            anchor=open_state(json.loads(stored),self.key)
+            local=(await self.db._one('SELECT revision FROM cashier_clock WHERE id=1'))['revision']
+            if payload['revision']<anchor['revision']:
+                raise ValueError('Remote checkpoint is older than the committed durable anchor')
+            if local>anchor['revision']:
+                # Power loss may leave SQLite committed but the Telegram update unacked.
+                # The GitHub checkpoint is authoritative; its charge IDs replay once.
+                await merge_cashier(self.db,anchor,self.bot_id,restore_durable_anchor=True)
+        result = await merge_cashier(self.db,payload,self.bot_id)
+        await self.db.set_state('cashier_durable_anchor',json.dumps(envelope))
         self.merged += result['changed']
         return result
 
@@ -221,7 +235,9 @@ class CloudFailover:
                 if remote['revision'] > payload['revision']:
                     raise LeaseLost('A newer cashier checkpoint already exists')
                 try:
-                    await self.github.write(DELTA,seal_state(payload,self.key,runtime),sha)
+                    sealed=seal_state(payload,self.key,runtime)
+                    await self.github.write(DELTA,sealed,sha)
+                    await self.db.set_state('cashier_durable_anchor',json.dumps(sealed))
                     self.last_revision, self.last_runtime = payload['revision'], runtime
                     await self.save_status('synchronized')
                     return
