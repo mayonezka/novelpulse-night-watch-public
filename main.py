@@ -46,7 +46,8 @@ def log_configuration(settings):
     logging.getLogger(__name__).info('NODE_MODE=%s', settings.node_mode)
 
 
-async def run(settings: Settings | None = None, *, cashier_max_seconds: float | None = None) -> None:
+async def run(settings: Settings | None = None, *, cashier_max_seconds: float | None = None,
+              on_cashier_ready=None) -> dict | None:
     settings = settings or Settings()
     log_configuration(settings)
     db = Database(settings.db_path)
@@ -88,21 +89,29 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                 BotCommand(command="paysupport", description="Помощь с оплатой"),
             ])
             await bot.delete_webhook(drop_pending_updates=False)
+            tasks=[]
             if settings.node_mode == 'bot_24x7':
                 from app.cashier import background_cashier
-                task = asyncio.create_task(background_cashier(db, bot, settings))
+                tasks.append(asyncio.create_task(background_cashier(db, bot, settings)))
             else:
-                task = asyncio.create_task(background_autopilot(db, bot, settings)) if settings.autopilot_interval_hours > 0 else None
+                from app.cashier import background_retention
+                tasks.append(asyncio.create_task(background_retention(db,bot,settings)))
+                if settings.autopilot_interval_hours > 0:
+                    tasks.append(asyncio.create_task(background_autopilot(db, bot, settings)))
             try:
                 if manager is not None:
                     from app.cloud_failover import poll_with_lease
+                    if on_cashier_ready:
+                        await on_cashier_ready(manager.session)
                     await poll_with_lease(dispatcher,bot,db,manager,max_seconds=cashier_max_seconds)
+                    return {'reason':manager.stop_reason,'epoch':manager.session,'role':manager.role}
                 else:
                     await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types(),
                                                    close_bot_session=False)
             finally:
-                if task is not None:
+                for task in tasks:
                     task.cancel()
+                for task in tasks:
                     with suppress(asyncio.CancelledError):
                         await task
     finally:
@@ -113,6 +122,16 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
             await db.close()
 
 
+async def supervise():
+    while True:
+        result=await run()
+        if not result or result.get('role')!='pc' or result.get('reason') not in (
+                'resume','lease_lost','conflict','heartbeat_unavailable','synchronization_failed'):
+            return
+        logging.getLogger(__name__).info('PC lease recovery: merge encrypted delta before resuming polling')
+        await asyncio.sleep(1)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # Do not log aiogram polling URLs, which include the bot token.
@@ -120,7 +139,7 @@ def main() -> None:
     logging.getLogger('httpx').setLevel(logging.WARNING)
     try:
         with bot_instance():
-            asyncio.run(run())
+            asyncio.run(supervise())
     except RuntimeError as error:
         logging.getLogger(__name__).error('%s', error)
     except ValidationError:

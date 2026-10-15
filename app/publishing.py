@@ -82,7 +82,10 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             text = (f"🎬 Опубликован новый Shorts! {report['video_engine']}\n{short['title']}\n\n{report['youtube_url']}\n"
                     f"📢 Telegram channel message_id: {message_id}\n"
                     f"🧹 Локальный MP4 удалён (на диске: {cleanup['disk']['mp4_count']} MP4)")
-            report['admin_alert'] = await notify_admins(bot, text, settings=settings, db=db, event_key=f'paired_upload:{short["id"]}')
+            if settings.autopilot_worker:
+                report['owner_alert_payload']={'text':text,'event_key':f'paired_upload:{short["id"]}'}
+            else:
+                report['admin_alert'] = await notify_admins(bot, text, settings=settings, db=db, event_key=f'paired_upload:{short["id"]}')
         except Exception as error:
             row = await db.get_short(short['id'])
             if telegram_started and row['status'] == 'sending':
@@ -91,9 +94,12 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             elif row['status'] == 'sending' and 'youtube_attempt' not in report:
                 await db.finish_short(short['id'], 'pending')
             report.update(status='partial', error=failure_reason(error))
-            report['admin_alert'] = await notify_admins(bot,
-                f"⚠️ Автопилот: ролик {short['id']} не завершён. {report['error']}. Повторные подтверждённые публикации исключены.",
-                settings=settings, db=db, event_key=f'paired_error:{short["id"]}:{datetime.now(timezone.utc).date()}')
+            text=f"⚠️ Автопилот: ролик {short['id']} не завершён. {report['error']}. Повторные подтверждённые публикации исключены."
+            key=f'paired_error:{short["id"]}:{datetime.now(timezone.utc).date()}'
+            if settings.autopilot_worker:
+                report['owner_alert_payload']={'text':text,'event_key':key}
+            else:
+                report['admin_alert']=await notify_admins(bot,text,settings=settings,db=db,event_key=key)
         finally:
             cleanup = enforce_zero_mp4_clutter(cleanup_root)
             previous = report.get('cleanup', {})

@@ -82,7 +82,7 @@ async def _run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | N
                   "videos_created": [], "series": [], "errors": [], "channel": "не настроен"}
         username = (await bot.get_me()).username
         from app.notifications import retry_owner_alerts
-        report['owner_alert_retries'] = await retry_owner_alerts(db, bot, settings)
+        report['owner_alert_retries'] = [] if settings.autopilot_worker else await retry_owner_alerts(db, bot, settings)
         directory.mkdir(parents=True, exist_ok=True)
         for series in await db.list_all_series():
             item = {"id": series["id"], "title": series["title"]}
@@ -186,6 +186,10 @@ async def _run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | N
 async def run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | None = None,
                               output_dir: str | Path = TRAFFIC_DIR) -> dict:
     """Cleanup also runs when startup/network failures escape the inner cycle."""
+    settings=settings or Settings()
+    if settings.cloud_failover_enabled and not settings.autopilot_worker:
+        from app.autopilot_process import run_isolated_cycle
+        return await run_isolated_cycle(db,bot,settings,output_dir)
     directory = Path(output_dir)
     cleanup_root = Path('data') if directory.resolve() == TRAFFIC_DIR.resolve() else directory
     try:
@@ -204,6 +208,9 @@ async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> No
     if settings.autopilot_interval_hours <= 0:
         return
     while True:
+        if (Path(db.path).resolve().parent/'autopilot.pause').exists():
+            await asyncio.sleep(5)
+            continue
         from app.scheduling import upload_schedule
         schedule = await upload_schedule(db, settings)
         if not schedule['due']:
@@ -212,7 +219,7 @@ async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> No
             continue
         try:
             report = await run_autopilot_cycle(db, bot, settings=settings)
-            if settings.channel_id:
+            if settings.channel_id and not settings.cloud_failover_enabled:
                 chat = await bot.get_chat(settings.channel_id)
                 if chat.username:
                     await publish_seo_cluster(db, (await bot.get_me()).username, "@" + chat.username)

@@ -7,22 +7,7 @@ permissions:
   contents: write
   actions: write
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    outputs:
-      start: ${{ steps.lease.outputs.start }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - id: lease
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/cloud_gate.py
   cashier:
-    needs: check
-    if: needs.check.outputs.start == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     concurrency:
@@ -38,12 +23,17 @@ jobs:
       NODE_MODE: bot_24x7
       CLOUD_FAILOVER_ENABLED: 'true'
       GITHUB_TOKEN: ${{ github.token }}
+      CLOUD_MAX_SECONDS: '19200'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: python -m pip install -r requirements-cloud.txt
       - run: python scripts/run_cloud_night_watch.py
+      - name: Always queue warm successor
+        if: always()
+        run: python scripts/relay_night_watch.py

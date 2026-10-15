@@ -69,6 +69,8 @@ class Settings(PipelineSettings):
     cloud_github_token: SecretStr | None = None
     cloud_state_key: SecretStr | None = None
     cloud_role: Literal['pc', 'cloud'] = 'pc'
+    autopilot_worker: bool = False
+    autopilot_timeout_seconds: int = Field(default=1800,ge=30,le=10800)
 
     @field_validator('cloud_github_token', 'cloud_state_key', mode='before')
     @classmethod
