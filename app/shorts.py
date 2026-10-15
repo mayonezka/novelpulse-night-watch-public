@@ -207,7 +207,10 @@ async def publish_short_to_channel(db, bot, channel_id, *, short_id=None, root=S
                     InlineKeyboardButton(text='📖 Читать в боте ➡️', url=bot_link(username, short['series_id']))]]))
             await db.record_short_publication(short['id'], 'telegram', str(channel_id), str(sent.message_id))
             removed = delete_video(path, root=root)
+            from app.publishing import publish_story_poll
+            poll=await publish_story_poll(db,bot,channel_id,short['id'],sent.message_id)
             return {'status': 'uploaded', 'short_id': short['id'], 'message_id': sent.message_id,
+                    'poll':poll,'telegram_poll_message_id':poll.get('message_id'),
                     'bytes_deleted': sum(p['bytes'] for p in removed), 'mp4_deleted': sum(p['mp4'] for p in removed)}
         except Exception as error:
             if not sent:
