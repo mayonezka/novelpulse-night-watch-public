@@ -265,6 +265,10 @@ MIGRATIONS = (
         PRIMARY KEY(short_id,destination)
     );
     """,
+    """
+    ALTER TABLE paywall_views ADD COLUMN peek_used INTEGER NOT NULL DEFAULT 0 CHECK(peek_used IN (0,1));
+    DROP TRIGGER IF EXISTS cashier_paywall_views_update;
+    """,
 )
 
 
@@ -312,6 +316,12 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 15:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(paywall_views)')}
+                    if 'peek_used' in columns:
+                        await self.connection.execute('DROP TRIGGER IF EXISTS cashier_paywall_views_update')
+                        await self.connection.execute(f'PRAGMA user_version = {index + 1}')
+                        continue
                 if index == 6:
                     columns = {row["name"] for row in await self._all("PRAGMA table_info(payment_orders)")}
                     if "is_tripwire" not in columns:
@@ -852,6 +862,33 @@ class Database:
             sql += " AND chapter_id = ?"
             args += (chapter_id,)
         await self.connection.execute(sql, args)
+
+    async def has_used_peek(self, tg_id: int, chapter_id: int) -> bool:
+        async with self._lock:
+            row = await self._one('SELECT peek_used FROM paywall_views WHERE tg_id=? AND chapter_id=?',
+                                  (tg_id, chapter_id))
+            return bool(row and row['peek_used'])
+
+    @durable_write
+    async def mark_peek_used(self, tg_id: int, chapter_id: int) -> bool:
+        """Atomically consume one preview, checkpointing before the reader sees it."""
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                chapter = await self._chapter(chapter_id)
+                if not chapter or not chapter['is_published'] or await self._can_read(tg_id, chapter):
+                    await self.connection.commit()
+                    return False
+                cursor = await self.connection.execute(
+                    'INSERT INTO paywall_views(tg_id,chapter_id,series_id,peek_used) VALUES (?,?,?,1) '
+                    'ON CONFLICT(tg_id,chapter_id) DO UPDATE SET peek_used=1 WHERE paywall_views.peek_used=0',
+                    (tg_id, chapter_id, chapter['series_id']))
+                claimed = cursor.rowcount == 1
+                await self.connection.commit()
+                return claimed
+            except BaseException:
+                await self.connection.rollback()
+                raise
 
     async def log_paywall_view(self, tg_id: int, chapter_id: int) -> None:
         async with self._lock:

@@ -1,5 +1,8 @@
 """One render, two durable remote publications, zero retained MP4 and owner alert."""
+import asyncio
 import json
+import html
+import hashlib
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,129 @@ STORY_OPTIONS=(
     '🛡 Скрыть свой истинный ранг и изучить уязвимость',
     '📖 Сразу открыть следующую главу в @NovelPulseBot',
 )
+
+
+def build_chapter_release_digest(new_series, updated_series, username, channel_url):
+    """Public release note based only on the verified, published SQLite catalogue."""
+    from app.telegraph_seo import bot_link
+    lines = ['🔥 Свежий релиз глав!', '', f"📚 Новая новелла: {new_series['title']}"]
+    if new_series.get('description'):
+        lines.extend(['', new_series['description'][:450]])
+    if new_series.get('telegraph_url'):
+        lines.extend(['', f"⚡ Instant View: {new_series['telegraph_url']}"])
+    lines.append(f"📖 Читать: {bot_link(username, new_series['id'])}")
+    lines.extend(['', '✨ Новые главы уже в библиотеке:'])
+    for item in updated_series:
+        nums = item['chapter_nums']
+        if nums:
+            lines.append(f"• {item['title'][:150]} — главы {min(nums)}–{max(nums)}")
+    lines.extend(['', 'Главы 7–10 открывают новые повороты в расширенной библиотеке.',
+        '⚡ VIP на 24 часа — 19 ⭐️ · 👑 VIP на 7 дней — 49 ⭐️: доступ ко всем новеллам.',
+        f"📢 Канал: {channel_url}"])
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = [[InlineKeyboardButton(text='📖 Читать новую новеллу', url=bot_link(username, new_series['id']))]]
+    if new_series.get('telegraph_url'):
+        keyboard.append([InlineKeyboardButton(text='⚡ Открыть Instant View', url=new_series['telegraph_url'])])
+    for item in updated_series:
+        if item['chapter_nums']:
+            keyboard.append([InlineKeyboardButton(text=f"📚 {item['title'][:35]}",
+                url=bot_link(username, item['id']))])
+    return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+async def _notify_updated_readers(db, bot, series):
+    from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    summary = {'sent': 0, 'failed': 0}
+    for item in series:
+        readers = await db.readers_to_notify(item['id'])
+        for reader in readers:
+            following = await db.next_chapter(item['id'], reader['read_chapter'])
+            if following is None:
+                continue
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text='📖 Продолжить чтение 👉', callback_data=f"chapter:{following['id']}")]])
+            try:
+                try:
+                    await bot.send_message(reader['tg_id'],
+                        f"🔥 Вышли новые главы новеллы «{item['title'][:180]}»! Продолжить чтение 👉",
+                        parse_mode=None, reply_markup=markup, disable_notification=True)
+                except TelegramRetryAfter as error:
+                    if error.retry_after > 60:
+                        raise
+                    await asyncio.sleep(error.retry_after)
+                    await bot.send_message(reader['tg_id'],
+                        f"🔥 Вышли новые главы новеллы «{item['title'][:180]}»! Продолжить чтение 👉",
+                        parse_mode=None, reply_markup=markup, disable_notification=True)
+                await db.mark_notified(reader['tg_id'], item['id'], reader['latest_chapter'])
+                summary['sent'] += 1
+            except TelegramForbiddenError:
+                await db.mark_notified(reader['tg_id'], item['id'], reader['latest_chapter'])
+                summary['failed'] += 1
+            except Exception:
+                summary['failed'] += 1
+            await asyncio.sleep(.05)
+    return summary
+
+
+async def publish_chapter_release_digest(db, bot, channel_id):
+    """Post one idempotent release digest, notify existing readers, and refresh pinned #12."""
+    from app.telegraph_seo import channel_link
+    from app.autopilot import build_navigator
+    from aiogram.types import LinkPreviewOptions
+    manifest = json.loads(await db.get_state('stage20_release_manifest') or '{}')
+    new_id = manifest.get('new_series_id')
+    updated_ids = manifest.get('updated_series_ids', [])
+    if not new_id or not updated_ids:
+        raise ValueError('Нет проверенного манифеста релиза Stage 20')
+    new_series = await db.get_series(int(new_id))
+    if not new_series or not new_series.get('telegraph_url'):
+        raise ValueError('Для новой новеллы ещё нет Telegraph Instant View')
+    updated = []
+    for series_id in updated_ids:
+        item = await db.get_series(int(series_id))
+        if not item:
+            continue
+        chapters = await db.list_chapters(item['id'])
+        nums = [c['chapter_num'] for c in chapters if c['chapter_num'] > 2]
+        if nums:
+            item['chapter_nums'] = nums
+            updated.append(item)
+    channel_url = channel_link(channel_id)
+    username = (await bot.get_me()).username
+    text, markup = build_chapter_release_digest(new_series, updated, username, channel_url)
+    signature = hashlib.sha256(json.dumps({'new': new_series['id'],
+        'chapters': [(i['id'], i['chapter_nums']) for i in updated]}, sort_keys=True).encode()).hexdigest()
+    prior = await db.get_state('stage20_release_digest_receipt')
+    receipt = json.loads(prior) if prior else {}
+    if receipt.get('signature') != signature:
+        sent = await bot.send_message(channel_id, text, parse_mode=None, reply_markup=markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True))
+        receipt = {'signature': signature, 'message_id': sent.message_id}
+        await db.set_state('stage20_release_digest_receipt', json.dumps(receipt))
+    readers = await _notify_updated_readers(db, bot, updated)
+    from app.telegraph_seo import HUB_TITLES
+    hubs = json.loads(await db.get_state('seo_hubs') or '[]')
+    series = await db.list_series()
+    for item in series:
+        item['chapter_count'] = len(await db.list_chapters(item['id']))
+    deployment = json.loads(await db.get_state('public_web_deployment') or '{}')
+    nav = build_navigator(series, username, hubs,
+        deployment.get('base_url', '') if deployment.get('status') == 'live' else '',
+        total_chapters=sum(item['chapter_count'] for item in series))
+    chat = await bot.get_chat(channel_id)
+    pinned = getattr(chat, 'pinned_message', None)
+    if pinned is not None and pinned.message_id != 12:
+        raise ValueError(f'Ожидался навигатор #12 в закрепе, Telegram показывает #{pinned.message_id}')
+    await bot.edit_message_text(nav, chat_id=channel_id, message_id=12, parse_mode='HTML',
+        link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await bot.pin_chat_message(chat_id=channel_id, message_id=12, disable_notification=True)
+    navigator = {'message_id': 12, 'pinned': True,
+        'digest': hashlib.sha256(nav.encode()).hexdigest(), 'state': 'sent'}
+    await db.set_state(f'channel_navigator:{channel_id}', json.dumps(navigator))
+    return {'message_id': receipt['message_id'], 'navigator_message_id': 12,
+        'navigator_chapters': sum(item['chapter_count'] for item in series),
+        'series_count': len(series), 'notified_readers': readers}
 
 
 async def publish_story_poll(db,bot,channel_id,short_id,video_message_id):

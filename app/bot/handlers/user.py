@@ -15,6 +15,22 @@ from app.monetization import VIP_PLANS, VIP_LABELS
 from app.notifications import notify_admins
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
+PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
+
+
+def deep_peek_excerpt(text: str) -> str:
+    """900–950 characters for long chapters; always retain unrevealed story text."""
+    text = text.strip()
+    if len(text) <= 950:
+        # Short demo chapters cannot supply 900 characters without revealing everything.
+        end = max(1, min(len(text) - 1, int(len(text) * .8)))
+        boundary = text.rfind(' ', 0, end)
+        return text[:boundary if boundary > 0 else end].rstrip('.!?… \n') + '…'
+    candidates = [i for i in range(900, 950) if text[i].isspace()
+                  and text[i - 1] not in '.!?…»\n']
+    keys = ('систем', 'ранг', 'смерт', 'кров', 'таймер', 'двер', '—', '«')
+    end = max(candidates, key=lambda i: (sum(k in text[max(0, i-130):i].casefold() for k in keys), i)) if candidates else 949
+    return text[:end].rstrip() + '…'
 
 
 def keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
@@ -61,7 +77,8 @@ async def show_series(bot: Bot, chat_id: int, series_id: int, db: Database) -> N
 
 async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: Database,
                        *, page: int = 0, edit_message_id: int | None = None,
-                       purchased_delivery: bool = False) -> None:
+                       purchased_delivery: bool = False, deep_peek: bool = False,
+                       edit_locked: bool = False) -> None:
     purchased = await db.has_purchase(tg_id, chapter_id)
     chapter = await db.get_chapter(chapter_id, include_unpublished=purchased_delivery or purchased)
     if not chapter:
@@ -101,8 +118,8 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         if chat_id == tg_id:
             await db.record_read(tg_id, chapter["series_id"], chapter["chapter_num"])
     else:
-        teaser = chapter["content_text"][:300]
-        if len(chapter["content_text"]) > 300:
+        teaser = deep_peek_excerpt(chapter['content_text']) if deep_peek else chapter["content_text"][:300]
+        if not deep_peek and len(chapter["content_text"]) > 300:
             teaser += "…"
         account = await db.get_user(tg_id)
         credits = account["free_unlock_credits"] if account else 0
@@ -116,17 +133,46 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
             label = f"🔓 Открыть главу за {offer['price']} ⭐️"
             banner = ("\n\n💡 Вы уже открыли первую платную главу! Дальше выгоднее взять 👑 VIP на 7 дней (49 ⭐️) "
                       "и читать ВСЕ главы всех новелл без ограничений.") if offer["has_purchased"] else ""
-        rows = [[button(label, f"buy:{chapter_id}")]]
+        rows = []
+        if not await db.has_used_peek(tg_id, chapter_id):
+            rows.append([button(PEEK_LABEL, f'peek:{chapter_id}')])
+        rows.append([button(label, f"buy:{chapter_id}")])
         if credits > 0:
             rows.append([button(f"🔑 Открыть за бонусный ключ (осталось: {credits})", f"credit:{chapter_id}")])
         rows.extend([[button(VIP_LABELS[days], f'vip:{days}:{price}')] for days, price in VIP_PLANS.items()])
-        rows.extend([[button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
+        rows.extend([[button("🎁 Открыть бесплатно за друга", "referral")],
                      [button("👑 Купить VIP-доступ", "vip")], [button("🔙 Назад к каталогу", "catalog")]])
-        await send_text(bot, chat_id, heading + teaser + banner +
-                        "\n\n🔒 Самое интересное впереди! Откройте главу навсегда за Telegram Stars. "
-                        "Нажимая «Открыть», вы принимаете /terms. Вопросы об оплате: /paysupport.", keyboard(rows))
+        if deep_peek:
+            heading = f"{chapter['series_title'][:350]}\nГлава {chapter['chapter_num']}: {chapter['title'][:250]}\n\n"
+            banner = ("\n\n🔥 Вы уже на середине главы! Чем закончится эта сцена? "
+                      f"Откройте полную главу навсегда всего за {offer['price']} ⭐️ "
+                      "(или 🎁 получите бесплатный ключ за 1 друга):")
+        text = (heading + teaser + banner +
+                "\n\n🔒 Самое интересное впереди! Откройте главу навсегда за Telegram Stars. "
+                "Нажимая «Открыть», вы принимаете /terms. Вопросы об оплате: /paysupport.")
+        if edit_message_id is not None and edit_locked:
+            try:
+                await bot.edit_message_text(text, chat_id=chat_id, message_id=edit_message_id,
+                    parse_mode=None, reply_markup=keyboard(rows))
+            except TelegramBadRequest as error:
+                if 'message is not modified' not in error.message.lower():
+                    raise
+        else:
+            await send_text(bot, chat_id, text, keyboard(rows))
         if chat_id == tg_id:
             await db.log_paywall_view(tg_id, chapter_id)
+
+
+async def peek(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    await db.ensure_user(query.from_user.id, query.from_user.username)
+    chapter_id = int(query.data.split(':')[1])
+    claimed = await db.mark_peek_used(query.from_user.id, chapter_id)
+    # Stale/repeated buttons return the ordinary paywall without revealing a second excerpt.
+    await show_chapter(bot, query.message.chat.id, query.from_user.id, chapter_id, db,
+        edit_message_id=query.message.message_id, deep_peek=claimed, edit_locked=True)
 
 
 async def start(message: Message, command: CommandObject, bot: Bot, db: Database, settings: Settings) -> None:
@@ -270,6 +316,7 @@ def create_router() -> Router:
     router.callback_query.register(vip, F.data == "vip")
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
+    router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))
     router.callback_query.register(navigate, F.data.regexp(
         r"^(catalog|(?:series|chapter):[1-9][0-9]{0,17}|page:[1-9][0-9]{0,17}:[0-9]{1,6})$"))
     return router

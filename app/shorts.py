@@ -19,6 +19,8 @@ SHORTS_DIR = Path('data/shorts_queue')
 def shock_hook(series: dict, episode_num: int = 1) -> str:
     """Narrator copy only; formal titles/episode labels are never spoken as an intro."""
     title=series['title'].casefold()
+    if 'очевидно' in title and 'святой' in title:
+        return 'Он объявил себя святым — и заставил четырёх архангелов работать на себя!'
     if 'приручения' in title or 'самозанятый' in title:
         return 'Что делать, если Система выдала тебе ошейник питомца вместо оружия?!'
     if 'изменённом мире' in title or 'измененном мире' in title:
@@ -34,6 +36,9 @@ def shock_hook(series: dict, episode_num: int = 1) -> str:
 
 def viral_theme(series: dict) -> tuple[tuple[str, str, str], str]:
     title = series['title'].casefold()
+    if 'очевидно' in title and 'святой' in title:
+        return ('Очевидно святой', 'Четыре архангела получили работу от смертного',
+                'Святой или самозванец кто такой Коул'), '#фэнтези #новелла #shorts'
     if 'нулевого ранга' in title or 'нулевой ранг' in title:
         return ('Ему дали НУЛЕВОЙ РАНГ но Система дала сбой',
                 'Система показала ему собственную могилу',

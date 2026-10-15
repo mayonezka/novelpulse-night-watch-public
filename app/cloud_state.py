@@ -106,6 +106,12 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                     raise ValueError('Invalid cashier table size')
                 identities = set()
                 for row in rows:
+                    # A warm Stage 21 runner may hydrate the last Stage 20 checkpoint.
+                    # Only this known additive column has a backwards-compatible default.
+                    legacy_peek = (table == 'paywall_views' and isinstance(row, dict)
+                        and 'peek_used' in columns and set(row) == set(columns) - {'peek_used'})
+                    if legacy_peek:
+                        row = {**row, 'peek_used': 0}
                     if (not isinstance(row, dict) or set(row) != set(columns) or
                             any(type(v) not in (int, float, str, type(None)) for v in row.values())):
                         raise ValueError(f'Invalid row schema: {table}')
@@ -115,6 +121,8 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                     identities.add(identity)
                     existing = await db._one(f"SELECT {','.join(columns)} FROM {table} WHERE " +
                         ' AND '.join(f'{k}=?' for k in pk), identity)
+                    if legacy_peek and existing:
+                        row['peek_used'] = existing['peek_used']
                     if existing == row:
                         continue
                     if table == 'purchases' and existing and any(existing[k] != row[k] for k in

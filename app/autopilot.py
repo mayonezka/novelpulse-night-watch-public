@@ -139,7 +139,10 @@ async def _run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | N
                 from app.shorts import generate_shorts_queue
                 from app.publishing import publish_short_pair
                 from app.replenishment import replenish_content_queue
+                from app.youtube_uploader import MAX_YOUTUBE_UPLOADS_PER_24H, youtube_blocked_until
                 from app.shorts import SHORTS_DIR
+                report['youtube_pacer'] = {'max_uploads_per_24h': MAX_YOUTUBE_UPLOADS_PER_24H,
+                    'cooldown_until': await youtube_blocked_until(db)}
                 shorts_dir = SHORTS_DIR if directory.resolve() == TRAFFIC_DIR.resolve() else directory / 'shorts_queue'
                 if not json.loads(await db.get_state('replenishment_checkpoint') or '{}'):
                     await generate_shorts_queue(db, username, settings.channel_id, portal_url=settings.web_base_url or '', output_dir=shorts_dir)
@@ -234,10 +237,13 @@ async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> No
                             else settings.autopilot_interval_hours * 3600)
 
 
-def build_navigator(series: list[dict], username: str, hubs: list[dict], portal_url: str = '') -> str:
+def build_navigator(series: list[dict], username: str, hubs: list[dict], portal_url: str = '',
+                    total_chapters: int | None = None) -> str:
     lines = ["🧭 <b>Навигатор по библиотеке NovelPulse</b>", "",
              "🔥 Первая платная глава новому читателю — всего 1 ⭐️!", "",
              "Две первые главы бесплатны. Выберите свой мир:"]
+    if total_chapters is not None:
+        lines.insert(2, f"📚 {len(series)} новелл · {total_chapters} глав")
     if portal_url:
         from app.config import PipelineSettings
         portal_url = PipelineSettings(_env_file=None, web_base_url=portal_url).web_base_url

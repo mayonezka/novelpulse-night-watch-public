@@ -73,6 +73,11 @@ def build_episode_scenes(series: dict, chapters: list[dict], episode_num: int) -
         third = next((c for c in chapters if c['chapter_num'] == 3), None)
         second = dramatic_excerpt(third['content_text'][:300], 78) if third else dramatic_excerpt(free[-1]['content_text'], 78)
         bridge = 'Сможет ли герой выжить? Первую платную главу открой всего за одну звезду.'
+    if 'очевидно' in series['title'].casefold() and 'святой' in series['title'].casefold():
+        hook = 'Четыре архангела сомневаются. А епископ уже поручил им работу.'
+        first = dramatic_excerpt(free[0]['content_text'], 78)
+        second = dramatic_excerpt(free[-1]['content_text'], 78)
+        bridge = 'Святой или самозванец? Что узнают в Святой Земле?'
     from app.shorts import shock_hook
     return [shock_hook(series,episode_num),
             hook, first, second, bridge, *EPISODE_CTA_PARTS]
