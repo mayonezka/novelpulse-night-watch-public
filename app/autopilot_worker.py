@@ -30,11 +30,15 @@ async def work(args):
             from app.autopilot import _run_autopilot_cycle,publish_channel_showcase
             report=await _run_autopilot_cycle(db,bot,settings=settings,output_dir=args.output_dir)
             if settings.channel_id:
-                from app.telegraph_seo import publish_seo_cluster
-                chat=await bot.get_chat(settings.channel_id)
-                if chat.username:
-                    await publish_seo_cluster(db,(await bot.get_me()).username,'@'+chat.username)
-                report['showcase']=await publish_channel_showcase(db,bot,settings.channel_id)
+                try:
+                    from app.telegraph_seo import publish_seo_cluster
+                    chat=await bot.get_chat(settings.channel_id)
+                    if chat.username:
+                        await publish_seo_cluster(db,(await bot.get_me()).username,'@'+chat.username)
+                    report['showcase']=await publish_channel_showcase(db,bot,settings.channel_id)
+                except Exception as error:
+                    report['errors'].append({'step':'showcase','reason':type(error).__name__})
+                    report['status']='partial'
             target=Path(args.result)
             temporary=target.with_suffix('.tmp')
             temporary.write_text(json.dumps(report,ensure_ascii=False),encoding='utf-8');temporary.replace(target)

@@ -33,7 +33,12 @@ from app.scheduling import upload_schedule
 async def background_autopilot(db, bot, settings):
     # Keep the desktop scheduler behind a lazy boundary for phone deployments.
     from app.autopilot import background_autopilot as desktop_loop
-    await desktop_loop(db, bot, settings)
+    from app.autopilot_process import owner_alert_loop
+    alerts=asyncio.create_task(owner_alert_loop(db,bot,settings))
+    try:await desktop_loop(db, bot, settings)
+    finally:
+        alerts.cancel()
+        with suppress(asyncio.CancelledError):await alerts
 
 
 def log_configuration(settings):

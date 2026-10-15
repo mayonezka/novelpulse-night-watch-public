@@ -5,8 +5,49 @@ import os
 import subprocess
 import sys
 import uuid
+from datetime import datetime,timezone
 from contextlib import contextmanager
 from pathlib import Path
+
+
+async def queue_owner_alert(db,text,event_key):
+    # app_state is local IPC, outside the cashier revision/financial checkpoint.
+    await db.set_state('autopilot_alert:'+event_key,json.dumps({'text':text,'event_key':event_key}))
+
+
+async def drain_owner_alerts(db,bot,settings):
+    if not hasattr(db,'_owner_alert_lock'):
+        db._owner_alert_lock=asyncio.Lock()
+    async with db._owner_alert_lock:
+        await _drain_owner_alerts(db,bot,settings)
+
+
+async def _drain_owner_alerts(db,bot,settings):
+    from app.notifications import notify_admins
+    async with db._lock:
+        items=await db._all("SELECT key,value FROM app_state WHERE key LIKE 'autopilot_alert:%'")
+    for item in items:
+        payload=json.loads(item['value'])
+        if payload.get('retry_after',0)>datetime.now(timezone.utc).timestamp():continue
+        await notify_admins(bot,payload['text'],settings=settings,
+            db=None if settings.node_mode=='youtube_factory' else db,
+            event_key=payload['event_key'],retry_failed=True)
+        if db.durability_hook:await db.durability_hook()
+        receipts=await db._all('SELECT state FROM admin_alerts WHERE event_key=?',(payload['event_key'],))
+        if settings.node_mode=='youtube_factory' or (len(receipts)==len(settings.admin_ids) and all(r['state']=='sent' for r in receipts)):
+            async with db._lock:
+                await db.connection.execute('DELETE FROM app_state WHERE key=?',(item['key'],))
+        else:
+            payload['retry_after']=datetime.now(timezone.utc).timestamp()+300
+            await db.set_state(item['key'],json.dumps(payload))
+
+
+async def owner_alert_loop(db,bot,settings):
+    import logging
+    while True:
+        try:await drain_owner_alerts(db,bot,settings)
+        except Exception as error:logging.getLogger(__name__).warning('Factory alert relay: %s',type(error).__name__)
+        await asyncio.sleep(5)
 
 
 @contextmanager
@@ -86,13 +127,11 @@ async def run_isolated_cycle(db,bot,settings,output_dir):
                 if process.returncode or not result_path.is_file():
                     raise RuntimeError('Изолированный автопилот остановлен; детали в приватном autopilot_worker.log')
                 report=json.loads(result_path.read_text(encoding='utf-8'))
-                payload=report.get('short',{}).get('owner_alert_payload')
-                if payload:
-                    from app.notifications import notify_admins
-                    report['short']['admin_alert']=await notify_admins(bot,payload['text'],settings=settings,
-                        db=None if settings.node_mode=='youtube_factory' else db,
-                        event_key=payload['event_key'])
-                    if db.durability_hook: await db.durability_hook()
+                if report.get('short',{}).get('owner_alert_payload'):
+                    # The live relay may have delivered it while the child was replenishing.
+                    # Drain the durable IPC entry; never send a second result-based notification.
+                    await drain_owner_alerts(db,bot,settings)
+                    report['short']['admin_alert']={'status':'relayed_from_outbox'}
                 return report
             finally:
                 await terminate_tree(process)

@@ -84,6 +84,8 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
                     f"🧹 Локальный MP4 удалён (на диске: {cleanup['disk']['mp4_count']} MP4)")
             if settings.autopilot_worker:
                 report['owner_alert_payload']={'text':text,'event_key':f'paired_upload:{short["id"]}'}
+                from app.autopilot_process import queue_owner_alert
+                await queue_owner_alert(db,text,report['owner_alert_payload']['event_key'])
             else:
                 report['admin_alert'] = await notify_admins(bot, text, settings=settings, db=db, event_key=f'paired_upload:{short["id"]}')
         except Exception as error:
@@ -98,6 +100,8 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             key=f'paired_error:{short["id"]}:{datetime.now(timezone.utc).date()}'
             if settings.autopilot_worker:
                 report['owner_alert_payload']={'text':text,'event_key':key}
+                from app.autopilot_process import queue_owner_alert
+                await queue_owner_alert(db,text,key)
             else:
                 report['admin_alert']=await notify_admins(bot,text,settings=settings,db=db,event_key=key)
         finally:
