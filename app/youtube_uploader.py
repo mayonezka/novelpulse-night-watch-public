@@ -1,6 +1,7 @@
 """Real Chrome/CDP Studio publishing with explicit audience and remote receipts."""
 
 import asyncio
+import json
 import re
 import subprocess
 import os
@@ -15,6 +16,64 @@ CHROME = Path(r'C:\Program Files\Google\Chrome\Application\chrome.exe')
 PROFILE = Path('browser_profiles/youtube').resolve()
 NOT_KIDS = 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
 UPLOAD_COMPLETE_PATTERN = re.compile(r'(Загрузка(?: видео)? завершена|Upload complete|Проверка завершена|Checks complete|Обработка завершена)', re.I)
+FIRST_COMMENT=('📖 А как бы вы поступили на месте героя в этот момент? Полные главы на русском языке уже ждут '
+    'в нашем Телеграм-боте — просто вбейте в поиске Telegram: NovelPulseBot '
+    '(или переходите в канал @novelpulse_litrpg) 🔥')
+# YouTube renders emoji as <img>, so DOM text omits them even when the comment is posted.
+COMMENT_MATCH=FIRST_COMMENT.removeprefix('📖 ').removesuffix(' 🔥')
+
+
+async def post_first_comment(page,video_id,*,db=None):
+    """At most one submit; three pre-submit UI retries share a 15-second budget."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id):
+        return {'comment_posted':False,'comment_status':'invalid_video_id'}
+    key='youtube_comment:'+video_id
+    previous=json.loads(await db.get_state(key) or '{}') if db else {}
+    if previous.get('comment_posted'):return previous
+    submitted=previous.get('comment_status') in ('submitting','uncertain')
+    async def save(state,posted=False):
+        result={'comment_posted':posted,'comment_status':state,'video_id':video_id}
+        if db:await db.set_state(key,json.dumps(result))
+        return result
+    try:
+        async with asyncio.timeout(15):
+            await page.goto('https://www.youtube.com/watch?v='+video_id,wait_until='domcontentloaded',timeout=6000)
+            for attempt in range(3):
+                try:
+                    comments=page.locator('ytd-comments#comments').first
+                    await comments.wait_for(state='attached',timeout=2500)
+                    await comments.scroll_into_view_if_needed(timeout=1500)
+                    existing=comments.locator('ytd-comment-thread-renderer').filter(has_text=COMMENT_MATCH).first
+                    if submitted or await existing.count():
+                        await existing.wait_for(state='visible',timeout=1000)
+                        return await save('posted',True)
+                    placeholder=comments.locator('#placeholder-area').first
+                    await placeholder.click(timeout=2000)
+                    editor=comments.locator('#contenteditable-root[contenteditable="true"]').first
+                    await editor.fill(FIRST_COMMENT,timeout=1500)
+                    submit=comments.locator('#submit-button').get_by_role('button').first
+                    await submit.wait_for(state='visible',timeout=1000)
+                    # Persist BEFORE clicking. A timeout after submit is never auto-reposted.
+                    await save('submitting')
+                    submitted=True
+                    await submit.click(timeout=1500)
+                    await existing.wait_for(state='visible',timeout=3000)
+                    return await save('posted',True)
+                except Exception:
+                    if submitted and attempt==2:return await save('uncertain')
+                    if attempt<2:await asyncio.sleep(.5)
+        return await save('unavailable')
+    except Exception as error:
+        result=await save('uncertain' if submitted else 'unavailable')
+        result['comment_reason']=type(error).__name__
+        return result
+
+
+async def try_first_comment(page,video_id,db):
+    """Comment persistence/UI failures cannot downgrade a verified public upload."""
+    try:return await post_first_comment(page,video_id,db=db)
+    except Exception as error:
+        return {'comment_posted':False,'comment_status':'unavailable','comment_reason':type(error).__name__}
 
 
 class LoginRequired(RuntimeError):
@@ -285,7 +344,8 @@ async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9
                                                  on_draft=save_draft, on_upload_started=mark_upload_started, draft=draft)
                 await db.record_short_publication(short['id'], 'youtube', 'studio', receipt['video_id'], finalize=not keep_media)
                 removed = [] if keep_media else delete_video(path, root=root)
-                return {'status': 'uploaded', 'short_id': short['id'], **receipt, 'audience_audit': audit,
+                comment=await try_first_comment(page,receipt['video_id'],db)
+                return {'status': 'uploaded', 'short_id': short['id'], **receipt, **comment, 'audience_audit': audit,
                         'bytes_deleted': sum(p['bytes'] for p in removed), 'mp4_deleted': sum(p['mp4'] for p in removed)}
             except Exception as error:
                 row = await db.get_short(short['id'])
@@ -316,7 +376,9 @@ async def reconcile_youtube_publication(db, short_id, *, root=None, manage_slot=
             await wait_for_public_video(page, video_id, short['title'])
             await db.record_short_publication(short_id, 'youtube', 'studio', video_id, finalize=not keep_media)
             removed = [] if keep_media else delete_video(short['video_path'], root=root)
+            comment=await try_first_comment(page,video_id,db)
             return {'status': 'uploaded', 'short_id': short_id, 'video_id': video_id,
+                    **comment,
                     'url': 'https://youtube.com/shorts/' + video_id, 'visibility': 'public',
                     'bytes_deleted': sum(p['bytes'] for p in removed), 'mp4_deleted': sum(p['mp4'] for p in removed)}
 

@@ -29,7 +29,7 @@ EPISODE_CTA_PARTS = ('Продолжение истории уже в Телег
                      'просто вбей в поиск Телеграма NovelPulseBot',
                      'или переходи по ссылке в описании канала!')
 EPISODE_CTA = ' '.join(EPISODE_CTA_PARTS)
-RENDERER_VERSION = 3
+RENDERER_VERSION = 4
 LOOP_BRIDGE = 'И всё началось с того, что…'
 
 
@@ -300,6 +300,7 @@ async def generate_promo_video(series: dict, chapters: list[dict], bot_username:
                 'engine':'Viral Video Engine 2.0','mock_tts':mock_tts,'fps':FPS,'frames':math.ceil(duration*FPS),
                 'width':720,'height':1280,'duration':duration,'original_audio_duration':original,'tempo':tempo,
                 'voices':sorted(set(s['voice'] for s in timings)),'script':' '.join(scenes),'words':words,
+                'hud':'live countdown + 0..99% sync + S-class threat badges','parallax_layers':3,
                 'scenes':[{**s,'font_size':58,'stroke_width':4} for s in timings],'artwork':sources,
                 'system_chimes':system_starts,'soundtrack':'procedural minor drone -18 dB + impact/HUD/ticks',
                 'loop_bridge':LOOP_BRIDGE,'episode_num':episode_num,'episode_label':EPISODE_LABELS.get(episode_num,''),

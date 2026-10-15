@@ -78,9 +78,13 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             cleanup = enforce_zero_mp4_clutter(cleanup_root)
             report.update(status='uploaded', youtube_url=f'https://www.youtube.com/shorts/{video_id}',
                           video_id=video_id, telegram_message_id=message_id, cleanup=cleanup)
+            comment=json.loads(await db.get_state('youtube_comment:'+video_id) or '{}')
+            report.update(comment_posted=bool(comment.get('comment_posted')),
+                          comment_status=comment.get('comment_status','not_attempted'))
             await db.set_state('last_paired_upload', datetime.now(timezone.utc).isoformat())
             text = (f"🎬 Опубликован новый Shorts! {report['video_engine']}\n{short['title']}\n\n{report['youtube_url']}\n"
                     f"📢 Telegram channel message_id: {message_id}\n"
+                    f"💬 Первый комментарий: {'опубликован' if report['comment_posted'] else 'не подтверждён'} ({report['comment_status']})\n"
                     f"🧹 Локальный MP4 удалён (на диске: {cleanup['disk']['mp4_count']} MP4)")
             if settings.autopilot_worker:
                 report['owner_alert_payload']={'text':text,'event_key':f'paired_upload:{short["id"]}'}

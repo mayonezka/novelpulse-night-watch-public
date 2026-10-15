@@ -1,21 +1,60 @@
 """Bounded-memory 24 FPS artwork camera, particles, HUD and karaoke compositor."""
 import asyncio
 import bisect
-import hashlib
-import io
 import math
 import os
 import random
 import subprocess
 from functools import lru_cache
-from urllib.parse import quote
-import httpx
 import imageio_ffmpeg
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 SIZE=(720,1280)
 FPS=24
 POWER=('РАНГ','НУЛЕВОЙ','СИСТЕМ','СМЕРТ','УБИТЬ','МОГИЛ','РЕЛЬСОТРОН')
+
+
+def hud_state(t,duration):
+    # Include a true 0.0s frame in the encoded video (last timestamp is duration-1/FPS).
+    end=max(1/FPS,duration-1/FPS)
+    progress=min(1,max(0,t/end))
+    remaining=0.0 if t>=end else max(0,duration-t)
+    return {'remaining':remaining,'progress':progress,'percent':min(99,int(progress*99)),
+            'crimson':remaining<=5,'flash':int(t*8)%2==0}
+
+
+@lru_cache(maxsize=1)
+def shader_layers():
+    """Memory-only rune/lightning middle plane, defocused near plane and light shafts."""
+    mid=Image.new('RGBA',SIZE)
+    d=ImageDraw.Draw(mid)
+    rng=random.Random(1800)
+    for radius in (205,222,244):
+        d.ellipse((360-radius,580-radius,360+radius,580+radius),outline=(34,210,255,65),width=3)
+    for i in range(18):
+        angle=i*math.tau/18
+        x,y=360+232*math.cos(angle),580+232*math.sin(angle)
+        d.line((x-6,y-11,x+7,y+9),fill=(255,205,81,100),width=2)
+    for origin in (70,650):
+        points=[(origin,190)]
+        for y in range(220,980,43):points.append((origin+rng.randint(-50,50),y))
+        d.line(points,fill=(65,174,255,130),width=4)
+        d.line(points,fill=(214,243,255,185),width=1)
+    mid=Image.alpha_composite(mid.filter(ImageFilter.GaussianBlur(7)),mid)
+    near=Image.new('RGBA',SIZE)
+    d=ImageDraw.Draw(near)
+    for _ in range(22):
+        x,y=rng.randrange(720),rng.randrange(1280);r=rng.randrange(8,28)
+        d.ellipse((x-r,y-r,x+r,y+r),fill=(45,170,255,30),outline=(250,205,85,40),width=2)
+    near=near.filter(ImageFilter.GaussianBlur(5))
+    volume=Image.new('RGBA',SIZE)
+    d=ImageDraw.Draw(volume)
+    for x in (55,590):d.polygon([(x,0),(x+45,0),(x+240,1280),(x+90,1280)],fill=(55,110,180,18))
+    volume=volume.filter(ImageFilter.GaussianBlur(36))
+    vignette=Image.new('RGBA',SIZE,(1,3,12,0))
+    vignette.putalpha(Image.radial_gradient('L').resize(SIZE).point(lambda a:int(a*.5)))
+    volume=Image.alpha_composite(volume,vignette)
+    return mid,near,volume
 
 
 def procedural_art(seed,scene=0):
@@ -52,39 +91,10 @@ def procedural_art(seed,scene=0):
     return image.convert('RGB')
 
 
-async def fetch_artwork(series,*,offline=False):
-    # External artwork requests contain fixed public prompts only. No catalogue text,
-    # titles, descriptions, source URLs, reader IDs or catalogue-derived seeds leave here.
-    seed=1600
-    theme='mysterious rift world, dark anime lone adventurer, neon cyan magical class window'
-    prompts=[f'{theme}, {view}, cinematic dark fantasy illustration, highly detailed, vertical composition, no text, no logo'
-             for view in ('wide ruined city and portal','dramatic closeup hooded hero','huge glowing rune gate','looming shadow behind hero')]
-    images=[]
-    sources=[]
-    async with httpx.AsyncClient(timeout=6,follow_redirects=True,headers={'User-Agent':'NovelPulse-Media/2.0'}) as client:
-        for i,prompt in enumerate(prompts):
-            art=None
-            reason='explicit offline test'
-            if not offline:
-                try:
-                    url='https://image.pollinations.ai/prompt/'+quote(prompt,safe='')
-                    async with asyncio.timeout(6), client.stream('GET',url,params={'width':720,'height':1280,'nologo':'true','seed':seed+i}) as response:
-                        response.raise_for_status()
-                        data=bytearray()
-                        async for chunk in response.aiter_bytes():
-                            data.extend(chunk)
-                            if len(data)>8_000_000:
-                                raise ValueError('Image response exceeds 8 MB')
-                    with Image.open(io.BytesIO(data)) as original:
-                        if original.width*original.height>8_000_000:
-                            raise ValueError('Image dimensions exceed limit')
-                        art=ImageOps.fit(original.convert('RGB'),SIZE)
-                    reason=None
-                except Exception as error:
-                    reason=type(error).__name__+(f' HTTP {error.response.status_code}' if isinstance(error,httpx.HTTPStatusError) else '')
-            images.append(art if art is not None else await asyncio.to_thread(procedural_art,seed,i))
-            sources.append({'provider':'pollinations' if art is not None else 'procedural','reason':reason})
-    return images,sources
+async def fetch_artwork(series=None,*,offline=False):
+    # Compatibility argument is deliberately ignored; the provider accepts no book input.
+    from app.art_provider import fetch_artwork as fixed_artwork
+    return await fixed_artwork(offline=offline)
 
 
 def caption_groups(words):
@@ -129,11 +139,11 @@ class MotionRenderer:
         self.particles=[(self.rng.random()*720,self.rng.random()*1280,self.rng.uniform(0,6.28),self.rng.randint(1,3)) for _ in range(34)]
         self.chrome=Image.new('RGBA',SIZE)
         d=ImageDraw.Draw(self.chrome)
-        d.rounded_rectangle((30,44,690,148),30,fill=(150,12,45,245),outline=(255,215,0,255),width=4)
-        d.text((58,74),f'ЛИТРПГ · ЧАСТЬ {episode or 1}',font=font(39,True),fill='white',stroke_width=2,stroke_fill='black')
+        self.episode=episode or 1
+        self.magic,self.bokeh,self.vignette=shader_layers()
         from app.video_gen import _wrap,short_visual_hook
-        for i,line in enumerate(_wrap(d,short_visual_hook(title),font(34,True),620)):
-            d.text((42,175+i*44),line,font=font(34,True),fill='#FFD700',stroke_width=3,stroke_fill='black')
+        for i,line in enumerate(_wrap(d,short_visual_hook(title),font(32,True),620)):
+            d.text((42,270+i*43),line,font=font(32,True),fill='#FFD700',stroke_width=3,stroke_fill='black')
         d.rounded_rectangle((26,1000,694,1218),28,fill=(255,216,40,255),outline='white',width=4)
         d.ellipse((52,1034,84,1066),outline=(10,15,26),width=5)
         d.line((78,1062,94,1077),fill=(10,15,26),width=5)
@@ -164,7 +174,30 @@ class MotionRenderer:
             image=Image.blend(image,self.art[index+1],(local-.9)/.1)
         if t>self.duration-.3:
             image=Image.blend(image,self.art[0],min(1,(t-self.duration+.3)/.3))
-        return image.convert('RGBA')
+        image=image.convert('RGBA')
+        # Three independently moving depth planes: art camera, runes/lightning, near bokeh.
+        image=Image.alpha_composite(image,ImageChops.offset(self.magic,int(9*math.sin(t*.7)),int(6*math.cos(t*.5))))
+        image=Image.alpha_composite(image,ImageChops.offset(self.bokeh,int(22*math.sin(t*.4)),int(-18*t)%1280))
+        return Image.alpha_composite(image,self.vignette)
+
+    def hud(self,t):
+        state=hud_state(t,self.duration)
+        layer=Image.new('RGBA',SIZE)
+        d=ImageDraw.Draw(layer)
+        color=(255,35,76,255) if state['crimson'] else (60,231,255,255)
+        if state['crimson'] and not state['flash']:color=(149,21,52,255)
+        d.rounded_rectangle((24,26,696,246),22,fill=(3,10,26,224),outline=color,width=3)
+        d.text((48,43),f'[ СИСТЕМА · ЛИТРПГ · ЧАСТЬ {self.episode} ]',font=self.font(25,True),fill='#FFD966')
+        d.text((48,87),f"ДО СБОЯ СИСТЕМЫ: {state['remaining']:.1f}s",font=self.font(31,True),fill=color,
+               stroke_width=1,stroke_fill='black')
+        d.text((48,139),f"СИНХРОНИЗАЦИЯ: {state['percent']}%",font=self.font(24,True),fill='#C4FAFF')
+        d.rounded_rectangle((48,180,672,196),8,fill=(18,38,57,255),outline=(38,90,110,255),width=1)
+        width=round(620*state['progress'])
+        if width>0:
+            d.rounded_rectangle((50,182,50+width,194),min(5,width/2),fill=(42,221,255,255))
+            d.line((52,183,50+width,183),fill=(255,220,95,255),width=2)
+        d.text((48,211),'[РАНГ: S-КЛАСС]   [УГРОЗА: ЭКСТРЕМАЛЬНАЯ]',font=self.font(19,True),fill='#FFD966')
+        return layer
 
     def frame(self,t):
         image=self.background(t)
@@ -214,6 +247,7 @@ class MotionRenderer:
             y+=86
         image=Image.alpha_composite(image,layer)
         image=Image.alpha_composite(image,self.chrome)
+        image=Image.alpha_composite(image,self.hud(t))
         return image.convert('RGB')
 
 
