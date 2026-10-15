@@ -1,16 +1,1 @@
-{
-  "cloud_lease_until": "2026-10-15T08:38:19.450785+00:00",
-  "cloud_run_id": "38683137267",
-  "epoch": "ac5e8633b05a4b3a81e58cd34d7f80e2",
-  "host": "pc",
-  "lease_owner": null,
-  "pc_runtime": {
-    "executable": "pythonw.exe",
-    "pid": 35492,
-    "watchdog_active": true
-  },
-  "phase": "stopped",
-  "previous_cloud_epoch": null,
-  "status": "offline",
-  "updated_at": "2026-10-15T09:08:43.823386+00:00"
-}
+{"cloud_lease_until": "2026-10-15T08:38:19.450785+00:00", "cloud_run_id": "38683137267", "epoch": "ac5e8633b05a4b3a81e58cd34d7f80e2", "host": "pc", "lease_owner": null, "pc_runtime": {"executable": "pythonw.exe", "pid": 35492, "watchdog_active": true}, "phase": "stopped", "previous_cloud_epoch": null, "status": "offline", "updated_at": "2026-10-15T09:08:46.132424+00:00"}
