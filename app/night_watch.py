@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 import time
-from app.cloud_failover import GitHubState,HEARTBEAT,RUNNER,pc_online,cloud_online,utc_now
+from app.cloud_failover import GitHubState,HEARTBEAT,RUNNER,pc_online,cloud_online,utc_now,CASConflict
 
 logger=logging.getLogger(__name__)
 STANDBY_POLL_SECONDS=20
@@ -34,14 +34,22 @@ class HotStandby:
         value={'protocol':17,'mode':mode,'run_id':self.run_id,'updated_at':utc_now().isoformat(),
             'drained_epoch':self.drained_epoch,'active_epoch':epoch,
             'poll_seconds':self.poll_seconds,'pc_lease_seconds':120}
-        try:
-            _,sha=await self.github.read(RUNNER)
-        except RuntimeError as error:
-            if 'HTTP 404' not in str(error): raise
-            sha=None
-        except KeyError:
-            sha=None
-        await self.github.write(RUNNER,value,sha)
+        # Contents API commits share a branch ref even for different files. The
+        # cashier lease renewal may commit concurrently with this cosmetic marker.
+        for attempt in range(5):
+            try:
+                _,sha=await self.github.read(RUNNER)
+            except RuntimeError as error:
+                if 'HTTP 404' not in str(error): raise
+                sha=None
+            except KeyError:
+                sha=None
+            try:
+                await self.github.write(RUNNER,value,sha)
+                break
+            except CASConflict:
+                if attempt==4:raise
+                await self.sleep(.2*(attempt+1))
         if mode!=self.mode:
             logger.info('Night-Watch transition: %s -> %s',self.mode,mode)
             self.transitions.append(mode)
