@@ -8,11 +8,11 @@
   "lease_ttl_seconds": 120,
   "pc_runtime": {
     "executable": "pythonw.exe",
-    "pid": 50908,
+    "pid": 14232,
     "watchdog_active": true
   },
-  "phase": "taking_over",
+  "phase": "active",
   "previous_cloud_epoch": "935f9eefacb14932990c0f2755220567",
   "status": "online",
-  "updated_at": "2026-10-15T19:41:29.046599+00:00"
+  "updated_at": "2026-10-15T19:41:32.753817+00:00"
 }
