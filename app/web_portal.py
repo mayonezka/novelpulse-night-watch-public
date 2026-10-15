@@ -31,6 +31,7 @@ h1{font-size:clamp(32px,5vw,64px);line-height:1.15;letter-spacing:-1.5px;margin:
 .reader{max-width:780px;margin:0 auto 100px}.chapter{padding:35px 0;border-top:1px solid #31413c}.chapter h2{font-size:28px;line-height:1.4}.chapter p{white-space:pre-line;overflow-wrap:anywhere}
 .sticky{position:sticky;bottom:0;background:#14241ef5;border-top:1px solid #476038;padding:16px max(4%,calc((100% - 1120px)/2));display:flex;justify-content:space-between;align-items:center;gap:20px;backdrop-filter:blur(12px);font:14px/1.5 system-ui}
 footer{padding:30px 0;color:var(--muted);font:13px/1.7 system-ui}.description{color:var(--muted)}
+.audio-preview{margin:28px 0;padding:24px;border:1px solid #476038;border-radius:16px;background:var(--card);font:16px/1.6 system-ui}.audio-preview audio{display:block;width:100%;max-width:100%;margin:18px 0}.audio-preview summary{cursor:pointer;color:var(--muted)}
 @media(max-width:650px){.grid{grid-template-columns:1fr}.hero{padding:30px 0 40px}.card{padding:24px}header{align-items:flex-start;flex-direction:column;gap:12px}.sticky{font-size:12px;padding:12px 4%;gap:12px}.sticky .cta{font-size:12px;padding:10px 13px}body{font-size:17px}.links{padding:22px}}
 """
 
@@ -65,6 +66,29 @@ def chapter_html(chapter: dict) -> str:
     return f'<section class="chapter"><h2>Глава {chapter["chapter_num"]}. {escape(chapter["title"])}</h2>{paragraphs}</section>'
 
 
+def audio_preview_html(series, chapters, previews, link):
+    """A small inline MP3 keeps static hosting self-contained and local storage empty."""
+    import base64
+    from app.audiobook import preview_fingerprint
+    preview = previews.get(str(series['id']),{})
+    first = next((c for c in chapters if c['id']==preview.get('chapter_id')),None)
+    encoded = preview.get('audio_base64','')
+    if first is None or preview.get('source_digest')!=preview_fingerprint(first):
+        return f'<aside class="audio-preview"><h2>🎧 Слушайте в Telegram</h2><a href="{escape(link)}">Открыть аудиокнигу в боте</a></aside>'
+    try:
+        if not 100<=len(base64.b64decode(encoded,validate=True))<=260_000:
+            raise ValueError('Preview outside size budget')
+    except (ValueError,TypeError):
+        return ''
+    return ('<aside class="audio-preview"><h2>🎧 Послушайте начало истории</h2>'
+            '<p>Короткий аудиофрагмент · русская нейронная озвучка NovelPulse Audio</p>'
+            f'<audio controls preload="none" aria-label="Аудиофрагмент {escape(series["title"])}">'
+            f'<source src="data:audio/mpeg;base64,{encoded}" type="audio/mpeg">'
+            'Ваш браузер не поддерживает аудио. Откройте главу в Telegram.</audio>'
+            f'<details><summary>Текст аудиофрагмента</summary><p>{escape(preview.get("transcript",""))}</p></details>'
+            f'<a class="cta" href="{escape(link)}">🎧 Слушать полные главы в боте</a></aside>')
+
+
 async def generate_web_portal(db: Database, bot_username: str, *, output_dir: str | Path = 'docs',
                                base_url: str | None = None, channel_id: str | int | None = None) -> dict:
     config = PipelineSettings(_env_file=None, web_base_url=base_url)
@@ -75,6 +99,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
     directory.mkdir(parents=True, exist_ok=True)
     series_list = await db.list_series()
     hubs = json.loads(await db.get_state('seo_hubs') or '[]')
+    previews = json.loads(await db.get_state('web_audio_previews') or '{}')
     cards, files = [], []
     for series in series_list:
         link = bot_link(bot_username, series['id'])
@@ -90,7 +115,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         article = (f'<div class="hero"><div class="eyebrow">Библиотека / ЛитРПГ и новые миры</div>'
                    f'<h1>{escape(series["title"])}</h1><p>{escape(series["description"])}</p>'
                    '<span class="pill">Первые главы бесплатно</span><span class="pill">Перевод на русский</span></div>'
-                   '<article class="reader">' + ''.join(chapter_html(c) for c in chapters) +
+                   '<article class="reader">' + audio_preview_html(series,chapters,previews,link) + ''.join(chapter_html(c) for c in chapters) +
                    f'<div class="links"><h2>История продолжается…</h2><p>Следующая глава уже ждёт в Telegram. '
                    f'Новому читателю первая платная глава — всего 1 ⭐️.</p><a class="cta" href="{link}">Читать дальше в @{escape(bot_username)}</a></div></article>')
         sticky = f'<aside class="sticky"><span>🔥 Первая платная глава — 1 ⭐️<br>👑 VIP на все книги — 49 ⭐️ / 7 дней</span><a class="cta" href="{link}">Открыть продолжение ➡</a></aside>'

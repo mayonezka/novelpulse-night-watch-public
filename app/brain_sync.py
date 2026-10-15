@@ -36,6 +36,7 @@ STAGES = (
     '20. Углубление каталога, релизный дайджест, pacer 4 YouTube / 24 ч.',
     '21. Одноразовый deep-peek платной главы, премьера «Очевидно, святой».',
     '22. /brain_sync, /ceo_brief, ежедневный стрик и возобновление очереди после cooldown.',
+    '23. Аудиоглавы по запросу с проверкой доступа, подкаст в Telegram, HTML5-аудиопревью без локальных MP3.',
 )
 
 
@@ -87,6 +88,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         cloud = {}
     data_root = Path(db.path).resolve().parent
     mp4 = sum(1 for _ in data_root.rglob('*.mp4'))
+    mp3 = sum(1 for _ in data_root.rglob('*.mp3'))
     images = sum(1 for p in data_root.rglob('*') if p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'))
     text = '\n'.join([
         ROLE, '', f'Срез UTC: {datetime.now(timezone.utc).isoformat()}',
@@ -97,12 +99,12 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         f"Shorts: pending={counts.get('pending',0)}, uploaded={counts.get('uploaded',0)}; остальные статусы: "
             + (', '.join(f'{k}={v}' for k,v in sorted(counts.items()) if k not in ('pending','uploaded')) or 'нет') + factory_note,
         f'YouTube cooldown UTC: {cooldown or "нет"}. Не загружать до истечения cooldown; максимум 4 за скользящие 24 ч.',
-        f'Файлы рядом с SQLite: MP4={mp4}, временные изображения={images}.',
+        f'Файлы рядом с SQLite: MP4={mp4}, MP3={mp3}, временные изображения={images}.',
         f"Последний сохранённый статус кассы: {cloud.get('active_node','нет данных')}; "
         f"cloud={cloud.get('cloud_runner',{}).get('mode','не подтверждён')}; heartbeat UTC={cloud.get('heartbeat_at','нет')}.",
         'Сохранённый статус не заменяет live-проверку GitHub/Watchdog.', '',
         'СТРОГИЕ ИНВАРИАНТЫ',
-        '1. После каждой задачи 0 MP4 и 0 временных изображений в data/. Генерация JIT → доставка → удаление.',
+        '1. После каждой задачи 0 MP4, 0 MP3 и 0 временных изображений в data/. Генерация JIT → доставка → удаление.',
         '2. NovelPulse_Watchdog каждые 5 минут; один polling worker pythonw.exe, detached. '
         'Тяжёлое видео — изолированный subprocess. Историческая локальная dispatcher p95 ≈43 мс; это не гарантия сетевой задержки.',
         '3. Публичный Night-Watch остаётся HOT_STANDBY, cashier и каталог зашифрованы Fernet. '
@@ -112,7 +114,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'DmitryNeural + SvetlanaNeural, karaoke, Solo-Leveling HUD, Zero-402 art, MAX_YOUTUBE_UPLOADS_PER_24H=4.',
         '5. /brain_sync и /ceo_brief доступны только ADMIN_IDS. Не публиковать .env, токены, ID читателей или незашифрованную кассу.',
         '6. Стрик считается по UTC. Третий последовательный день даёт один ключ; повторное нажатие не даёт награду.', '',
-        'РЕАЛИЗОВАННЫЕ ЭТАПЫ 1–22 (проверяй live-результаты по журналам соответствующего этапа)', *STAGES, '',
+        'РЕАЛИЗОВАННЫЕ ЭТАПЫ 1–23 (проверяй live-результаты по журналам соответствующего этапа)', *STAGES, '',
         'ПУБЛИЧНЫЕ ТОЧКИ ВХОДА',
         'Бот: https://t.me/NovelPulseBot · Канал: https://t.me/novelpulse_litrpg',
         'Портал: https://mayonezka.github.io/novelpulse-library/', '',

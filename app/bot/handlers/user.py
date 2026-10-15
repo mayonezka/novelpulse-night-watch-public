@@ -78,7 +78,7 @@ async def show_series(bot: Bot, chat_id: int, series_id: int, db: Database) -> N
 async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: Database,
                        *, page: int = 0, edit_message_id: int | None = None,
                        purchased_delivery: bool = False, deep_peek: bool = False,
-                       edit_locked: bool = False) -> None:
+                       edit_locked: bool = False, audio_locked: bool = False) -> None:
     purchased = await db.has_purchase(tg_id, chapter_id)
     chapter = await db.get_chapter(chapter_id, include_unpublished=purchased_delivery or purchased)
     if not chapter:
@@ -104,6 +104,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
             following = await db.next_chapter(chapter["series_id"], chapter["chapter_num"])
             if following:
                 rows.append([button("➡️ Следующая глава", f"chapter:{following['id']}")])
+        rows.append([button('🎧 Слушать аудиокнигу', f'listen:{chapter_id}')])
         rows.append([button("🔙 Назад к каталогу", "catalog")])
         markup = keyboard(rows)
         if edit_message_id is not None:
@@ -150,6 +151,8 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         text = (heading + teaser + banner +
                 "\n\n🔒 Самое интересное впереди! Откройте главу навсегда за Telegram Stars. "
                 "Нажимая «Открыть», вы принимаете /terms. Вопросы об оплате: /paysupport.")
+        if audio_locked:
+            text = (f"🔒 Аудио-версия и полный текст доступны за {offer['price']} ⭐️ (или по VIP-подписке)!\n\n" + text)
         if edit_message_id is not None and edit_locked:
             try:
                 await bot.edit_message_text(text, chat_id=chat_id, message_id=edit_message_id,
@@ -161,6 +164,25 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
             await send_text(bot, chat_id, text, keyboard(rows))
         if chat_id == tg_id:
             await db.log_paywall_view(tg_id, chapter_id)
+
+
+async def listen(query: CallbackQuery, bot: Bot, db: Database, audio_jobs, cashier_lease=None) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    await db.ensure_user(query.from_user.id, query.from_user.username)
+    chapter_id = int(query.data.split(':')[1])
+    chapter = await db.get_chapter(chapter_id, include_unpublished=await db.has_purchase(query.from_user.id,chapter_id))
+    if chapter is None:
+        await query.message.answer('Глава пока недоступна. Откройте /catalog.')
+        return
+    if not await db.can_read(query.from_user.id, chapter):
+        await show_chapter(bot,query.message.chat.id,query.from_user.id,chapter_id,db,audio_locked=True)
+        return
+    result = audio_jobs.start(bot,db,query.from_user.id,query.message.chat.id,chapter_id,lease=cashier_lease)
+    await query.message.answer({'started':'🎧 Озвучиваю главу. Аудиокнига скоро появится здесь; пока можно продолжить чтение.',
+        'duplicate':'⏳ Ваша аудиоглава уже готовится. Дождитесь её отправки.',
+        'busy':'⏳ Сейчас готовятся другие аудиоглавы. Попробуйте через несколько минут.'}[result])
 
 
 async def peek(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -338,6 +360,7 @@ def create_router() -> Router:
     router.callback_query.register(vip, F.data == "vip")
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(daily_gift, F.data == "daily_gift")
+    router.callback_query.register(listen, F.data.regexp(r'^listen:[1-9][0-9]{0,17}$'))
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
     router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))
     router.callback_query.register(navigate, F.data.regexp(

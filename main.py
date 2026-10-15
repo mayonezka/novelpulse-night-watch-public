@@ -86,6 +86,7 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                 await background_autopilot(db, bot, settings)
                 return
             dispatcher = create_dispatcher(db, settings)
+            dispatcher['cashier_lease'] = manager
             await bot.set_my_commands([
                 BotCommand(command="start", description="Открыть NovelPulse"),
                 BotCommand(command="catalog", description="Каталог новелл"),
@@ -114,6 +115,7 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                     await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types(),
                                                    close_bot_session=False)
             finally:
+                await dispatcher['audio_jobs'].close()
                 for task in tasks:
                     task.cancel()
                 for task in tasks:

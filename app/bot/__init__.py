@@ -18,7 +18,8 @@ def create_dispatcher(db: Database, settings: Settings) -> Dispatcher:
     else:
         from app.bot.handlers import admin
         admin_router = admin.create_router()
-    dispatcher = Dispatcher(db=db, settings=settings, import_lock=asyncio.Lock(),
+    from app.audiobook import AudioJobs
+    dispatcher = Dispatcher(db=db, settings=settings, audio_jobs=AudioJobs(), import_lock=asyncio.Lock(),
                             video_lock=asyncio.Lock(), notify_lock=asyncio.Lock())
     dispatcher.include_routers(node_admin.create_router(), admin_router, payments.create_router(), user.create_router())
     return dispatcher

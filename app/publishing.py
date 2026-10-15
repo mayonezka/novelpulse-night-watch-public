@@ -23,6 +23,58 @@ STORY_OPTIONS=(
 )
 
 
+async def publish_podcast_chapter_drop(db, bot, channel_id, series_id=5, chapter_num=1):
+    """A replay-safe public free chapter; an ambiguous send is never retried blindly."""
+    from app.audiobook import render_chapter_audio, audio_title
+    series = await db.get_series(series_id)
+    rows = await db.list_chapters(series_id)
+    record = next((c for c in rows if c['chapter_num']==chapter_num),None)
+    if series is None or record is None or chapter_num>series['free_chapters_limit']:
+        raise ValueError('В канал можно публиковать только опубликованную бесплатную главу')
+    chapter = await db.get_chapter(record['id'])
+    key = f'podcast_drop:{channel_id}:{series_id}:{chapter_num}'
+    async with db._lock:
+        await db.connection.execute('BEGIN IMMEDIATE')
+        try:
+            row = await db._one('SELECT value FROM app_state WHERE key=?',(key,))
+            old = json.loads(row['value']) if row else {}
+            if old.get('state') in ('sent','sending','uncertain'):
+                await db.connection.commit()
+                return old
+            await db.connection.execute('INSERT INTO app_state(key,value) VALUES (?,?) ON CONFLICT(key) '
+                'DO UPDATE SET value=excluded.value',(key,json.dumps({'state':'sending'})))
+            await db.connection.commit()
+        except BaseException:
+            await db.connection.rollback()
+            raise
+    path = None
+    sending = False
+    try:
+        username = (await bot.get_me()).username
+        path = await render_chapter_audio(chapter,series)
+        caption = (f"🎧 NovelPulse Audio · Премьера аудиокниги\n\n«{series['title'][:220]}»\n"
+                   f"Глава {chapter_num}: {chapter['title'][:150]}\n\n"
+                   '⚡ Магия молний встречает физику — слушайте первую главу целиком.\n'
+                   '📖 Первые главы бесплатны. Продолжение — в боте, первая платная глава за 1 ⭐️!')
+        sending = True
+        result = await bot.send_audio(channel_id,FSInputFile(path),title=audio_title(chapter)[:128],
+            performer='NovelPulse',caption=caption,parse_mode=None,request_timeout=180,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text='🎧 Слушать продолжение в боте ➡️',url=bot_link(username,series_id))]]))
+        receipt = {'state':'sent','message_id':result.message_id,'series_id':series_id,'chapter_num':chapter_num,
+                   'chapter_id':chapter['id'],'sent_at':datetime.now(timezone.utc).isoformat()}
+        await db.set_state(key,json.dumps(receipt))
+        return receipt
+    except BaseException as error:
+        definite = isinstance(error,TelegramAPIError) and not isinstance(error,TelegramNetworkError)
+        await db.set_state(key,json.dumps({'state':'uncertain' if sending and not definite else 'failed',
+                                          'error_class':type(error).__name__}))
+        raise
+    finally:
+        if path is not None:
+            Path(path).unlink(missing_ok=True)
+
+
 def build_chapter_release_digest(new_series, updated_series, username, channel_url):
     """Public release note based only on the verified, published SQLite catalogue."""
     from app.telegraph_seo import bot_link
