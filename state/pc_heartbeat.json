@@ -11,8 +11,8 @@
     "pid": 57372,
     "watchdog_active": true
   },
-  "phase": "taking_over",
+  "phase": "active",
   "previous_cloud_epoch": null,
   "status": "online",
-  "updated_at": "2026-10-15T21:11:11.269817+00:00"
+  "updated_at": "2026-10-15T21:11:15.463725+00:00"
 }
