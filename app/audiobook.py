@@ -43,7 +43,13 @@ async def render_chapter_audio(chapter: dict, series: dict, voice: str = 'ru-RU-
     try:
         narration = audio_title(chapter) + '.\n\n' + text
         async with asyncio.timeout(900):
-            await edge_tts.Communicate(narration, voice=voice, rate='+10%').save(str(path))
+            try:
+                await edge_tts.Communicate(narration, voice=voice, rate='+10%').save(str(path))
+            except edge_tts.exceptions.NoAudioReceived:
+                # Some Edge endpoints reject word-boundary metadata while still
+                # serving the same neural voice with sentence boundaries.
+                await edge_tts.Communicate(narration, voice=voice, rate='+10%',
+                    boundary='SentenceBoundary').save(str(path))
         if not path.is_file() or path.stat().st_size < 100:
             raise RuntimeError('Сервис озвучки вернул пустой аудиофайл')
         if path.stat().st_size >= 49_000_000:

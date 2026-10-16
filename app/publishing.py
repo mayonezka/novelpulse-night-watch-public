@@ -198,26 +198,31 @@ async def publish_chapter_release_digest(db, bot, channel_id):
         'series_count': len(series), 'notified_readers': readers}
 
 
-async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: int,
-                                          updated_series: list[dict]) -> dict:
+async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: int | list[int],
+                                          updated_series: list[dict], *, milestone: str = '') -> dict:
     """Announce a verified catalog expansion and refresh the existing pinned navigator once."""
     from aiogram.exceptions import TelegramBadRequest
     from aiogram.types import LinkPreviewOptions
     from app.autopilot import build_navigator
     series = await db.list_series()
-    new_series = await db.get_series(new_series_id)
-    if not new_series or not new_series.get('telegraph_url'):
+    new_ids = [new_series_id] if isinstance(new_series_id, int) else list(new_series_id)
+    new_entries = [await db.get_series(sid) for sid in new_ids]
+    if not new_entries or any(not item or not item.get('telegraph_url') for item in new_entries):
         raise ValueError('У новой новеллы должны быть опубликованная статья Telegraph и ссылка Instant View')
+    if not set(new_ids).issubset({item['id'] for item in series}):
+        raise ValueError('Нельзя анонсировать новеллу без опубликованных глав')
     if any(not item.get('telegraph_url') for item in series):
         raise ValueError('Нельзя обновить навигатор до публикации Instant View для всего каталога')
     username = (await bot.get_me()).username
     from app.telegraph_seo import bot_link, channel_link
     channel_url = channel_link(channel_id)
-    lines = ['🔥 Свежий релиз в NovelPulse!', '', f"📚 Новая новелла: «{new_series['title']}»"]
-    if new_series.get('description'):
-        lines.extend(['', new_series['description'][:450]])
-    lines.extend(['', f"⚡ Instant View: {new_series['telegraph_url']}",
-                  f"📖 Читать в боте: {bot_link(username, new_series_id)}"])
+    lines = ['🔥 ' + (milestone or 'Свежий релиз в NovelPulse!')]
+    for new_series in new_entries:
+        lines.extend(['', f"📚 Новая новелла: «{new_series['title']}»"])
+        if new_series.get('description'):
+            lines.extend(['', new_series['description'][:450]])
+        lines.extend(['', f"⚡ Instant View: {new_series['telegraph_url']}",
+                      f"📖 Читать в боте: {bot_link(username, new_series['id'])}"])
     if updated_series:
         lines.extend(['', '⚡ Новые переведённые главы:'])
         for item in updated_series:
@@ -227,15 +232,14 @@ async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: in
     lines.extend(['', '⚡ VIP на 24 часа — 19 ⭐️ · 👑 VIP на 7 дней — 49 ⭐️',
                   f"📢 Новые главы и трейлеры: {channel_url}"])
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='📖 Читать новую новеллу', url=bot_link(username, new_series_id))],
-        [InlineKeyboardButton(text='⚡ Открыть Instant View', url=new_series['telegraph_url'])],
-    ])
+        [InlineKeyboardButton(text='📖 ' + item['title'][:52], url=bot_link(username, item['id']))]
+        for item in new_entries])
     signature = hashlib.sha256(json.dumps({
         'series_id': new_series_id,
         'chapters': [(item.get('id'), sorted(set(item.get('chapter_nums', [])))) for item in updated_series],
         'catalog': [(item['id'], len(await db.list_chapters(item['id']))) for item in series],
     }, sort_keys=True).encode()).hexdigest()
-    key = 'stage31_catalog_release_receipt'
+    key = 'stage35_catalog_release_receipt' if milestone else 'stage31_catalog_release_receipt'
     prior = json.loads(await db.get_state(key) or '{}')
     if prior.get('signature') == signature and prior.get('message_id'):
         message_id = prior['message_id']

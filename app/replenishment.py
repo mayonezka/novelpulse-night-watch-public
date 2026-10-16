@@ -19,17 +19,19 @@ def _has_cyrillic(value: str) -> bool:
 
 
 async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), chapters_each=2,
-                                    client=None) -> dict:
+                                    client=None, target_chapters: int | None = None) -> dict:
     """Import the next source chapters and verify translated, priced SQLite rows."""
     from app.pipeline import royalroad_fiction_url
     import httpx
 
     if chapters_each < 1:
         raise ValueError('chapters_each must be positive')
+    if target_chapters is not None and target_chapters < 1:
+        raise ValueError('target_chapters must be positive')
     if client is None:
         async with httpx.AsyncClient(timeout=40, transport=SourceTransport()) as owned:
             return await deepen_existing_royalroad(db, settings, series_ids=series_ids,
-                chapters_each=chapters_each, client=owned)
+                chapters_each=chapters_each, client=owned, target_chapters=target_chapters)
     translation_settings = settings.model_copy(update={'llm_api_key': None})
     results, errors = [], []
     for series_id in series_ids:
@@ -39,7 +41,7 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
         try:
             # RoyalRoad catalog IDs 7 and 8 were initially seeded with six chapters;
             # Stage 33 extends them through chapter 10 just like the earlier hits.
-            target_total = 10 if series_id in (3, 4, 5, 6, 7, 8) else 8
+            target_total = target_chapters or (10 if series_id in (3, 4, 5, 6, 7, 8, 9) else 8)
             before_list = await db.list_chapters(series_id)
             before_nums = {row['chapter_num'] for row in before_list}
             if set(range(1, target_total + 1)).issubset(before_nums):
@@ -56,15 +58,18 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
             source_url = royalroad_fiction_url(series['source_url'])
             old_nums = {row['chapter_num'] for row in before}
             translator = Translator(translation_settings, client)
+            missing = set(range(1, target_total + 1)) - before_nums
+            request_count = min(chapters_each, len(missing))
             run = await run_pipeline(source_url, translation_settings, db=db, client=client,
-                series_id=series_id, max_chapters=chapters_each, free_chapters_limit=2,
+                series_id=series_id, max_chapters=request_count, max_total_chapters=target_total,
+                free_chapters_limit=2,
                 translator=translator)
             after = [await db.get_chapter(row['id']) for row in await db.list_chapters(series_id)]
             added = [row for row in after if row['chapter_num'] not in old_nums]
             valid = [row for row in added if row['is_published'] and row['chapter_num'] > 2
                      and row['price_stars'] == 10 and _has_cyrillic(row['title'] + '\n' + row['content_text'])]
-            if len(valid) < chapters_each:
-                raise ValueError(f'Серия {series_id}: получено {len(valid)} новых опубликованных глав с кириллицей, нужно {chapters_each}')
+            if len(valid) < request_count:
+                raise ValueError(f'Серия {series_id}: получено {len(valid)} новых опубликованных глав с кириллицей, нужно {request_count}')
             results.append({'series_id': series_id, 'id': series_id, 'title': series['title'],
                 'chapter_nums': sorted(row['chapter_num'] for row in valid), 'imported': run.imported,
                 'max_chapter': max(row['chapter_num'] for row in after),
