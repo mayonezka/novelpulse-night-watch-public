@@ -100,13 +100,17 @@ class PCHeartbeatThread:
             url='https://api.github.com/repos/'+self.repo+'/contents/state/pc_heartbeat.json'
             with self._client_lock:
                 client=self._client
-            if client is None:
+            data={'message':'PC power event release','sha':sha,'content':encoded,'branch':'main'}
+            try:
+                if client is None:
+                    with httpx.Client(timeout=timeout,follow_redirects=False) as temporary:
+                        response=temporary.put(url,headers=self.headers,json=data,timeout=timeout)
+                else:
+                    response=client.put(url,headers=self.headers,json=data,timeout=timeout)
+            except (httpx.RemoteProtocolError,httpx.ConnectError,httpx.ReadError):
+                # GitHub closes idle keep-alive sockets; retry once with a fresh TLS session.
                 with httpx.Client(timeout=timeout,follow_redirects=False) as temporary:
-                    response=temporary.put(url,headers=self.headers,json={'message':'PC power event release',
-                        'sha':sha,'content':encoded,'branch':'main'},timeout=timeout)
-            else:
-                response=client.put(url,headers=self.headers,json={'message':'PC power event release',
-                    'sha':sha,'content':encoded,'branch':'main'},timeout=timeout)
+                    response=temporary.put(url,headers=self.headers,json=data,timeout=timeout)
             if response.status_code in (409,422):return False
             response.raise_for_status()
             try:new_sha=response.json()['content']['sha']
