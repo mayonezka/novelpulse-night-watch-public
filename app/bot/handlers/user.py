@@ -243,6 +243,18 @@ async def claim_sub_key(query: CallbackQuery, bot: Bot, db: Database, settings: 
     tg_id = query.from_user.id
     await db.ensure_user(tg_id, query.from_user.username)
     user = await db.get_user(tg_id)
+    # Read the clicked paywall's context, including the back button on the subscribe prompt.
+    selected_chapter = None
+    for row in query.message.reply_markup.inline_keyboard if query.message.reply_markup else []:
+        for item in row:
+            match = re.fullmatch(r'(?:buy|credit|peek|chapter):([1-9][0-9]{0,17})', item.callback_data or '')
+            if match:
+                chapter = await db.get_chapter(int(match[1]))
+                if chapter and not await db.can_read(tg_id, chapter):
+                    selected_chapter = chapter
+                    break
+        if selected_chapter:
+            break
     if user['channel_sub_reward_claimed']:
         text = '🔑 Вы уже получили подарок за подписку. Ваши ключи и ранг: /profile.'
     else:
@@ -271,6 +283,8 @@ async def claim_sub_key(query: CallbackQuery, bot: Bot, db: Database, settings: 
                 link = 'https://t.me/' + channel[1:]
             rows = [[InlineKeyboardButton(text='📢 Перейти в канал', url=link)]] if link else []
             rows.append([button('✅ Я подписался, проверить!', 'claim_sub_key')])
+            if selected_chapter:
+                rows.append([button('🔙 Вернуться к выбранной главе', f"chapter:{selected_chapter['id']}")])
             await query.message.answer(f'📢 Подпишитесь на наш канал {channel or "NovelPulse"}, '
                 'чтобы не пропускать новые аудио-главы, а затем нажмите кнопку ниже 👇', reply_markup=keyboard(rows))
             return
@@ -278,7 +292,7 @@ async def claim_sub_key(query: CallbackQuery, bot: Bot, db: Database, settings: 
         text = ('🎉 Подписка подтверждена! Вам начислен +1 🔑 бесплатный ключ к любой платной главе и +25 XP!'
             if claimed else '🔑 Вы уже получили подарок за подписку. Ваши ключи и ранг: /profile.')
     account = await db.get_user(tg_id)
-    chapter = await db.latest_locked_paywall(tg_id) if account['free_unlock_credits'] > 0 else None
+    chapter = (selected_chapter or await db.latest_locked_paywall(tg_id)) if account['free_unlock_credits'] > 0 else None
     rows = [[button('🔑 Открыть главу бонусным ключом', f"credit:{chapter['id']}")]] if chapter else []
     rows.append([button('📖 Каталог новелл', 'catalog')])
     await query.message.answer(text, reply_markup=keyboard(rows))
