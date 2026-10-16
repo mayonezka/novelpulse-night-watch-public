@@ -10,7 +10,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
     InlineQuery,InlineQueryResultArticle,InputTextMessageContent,InlineQueryResultsButton)
 
 from app.config import Settings
-from app.db import Database, GENRES
+from app.db import Database, GENRES, wuf_status
 from app.text import split_text
 from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
 from app.gamification import notify_levelups, status_window
@@ -189,6 +189,8 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         rows.extend(subscription_reward_rows(account))
         if not await db.has_used_peek(tg_id, chapter_id):
             rows.append([button(PEEK_LABEL, f'peek:{chapter_id}')])
+        timer = wuf_status(account['last_wuf_unlock_at'] if account else '')
+        rows.append([button(timer['label'], f'wuf_unlock:{chapter_id}' if timer['available'] else 'wuf_cooldown_info')])
         rows.append([button(label, f"buy:{chapter_id}")])
         if credits > 0:
             rows.append([button(f"🔑 Открыть за бонусный ключ (осталось: {credits})", f"credit:{chapter_id}")])
@@ -547,6 +549,31 @@ async def credit_unlock(query: CallbackQuery, bot: Bot, db: Database) -> None:
     await show_chapter(bot, query.message.chat.id, query.from_user.id, chapter_id, db)
 
 
+async def wuf_unlock(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    await db.ensure_user(query.from_user.id, query.from_user.username)
+    chapter_id = int(query.data.split(':')[1])
+    try:
+        inserted = await db.unlock_with_wuf(query.from_user.id, chapter_id)
+    except ValueError as error:
+        await query.message.answer(str(error))
+        return
+    if inserted:
+        await query.message.answer('🎉 Вы открыли главу бесплатно по суточному таймеру! '
+            'Следующий бесплатный доступ откроется через 24 часа. Приятного чтения!')
+    await show_chapter(bot, query.message.chat.id, query.from_user.id, chapter_id, db)
+
+
+async def wuf_cooldown_info(query: CallbackQuery, db: Database) -> None:
+    account = await db.get_user(query.from_user.id)
+    timer = wuf_status(account['last_wuf_unlock_at'] if account else '')
+    text = ('⏳ Бесплатная глава уже доступна! Откройте нужную главу заново.'
+            if timer['available'] else timer['label'])
+    await query.answer(text, show_alert=True)
+
+
 async def vip(query: CallbackQuery, db: Database) -> None:
     await query.answer()
     if isinstance(query.message, Message):
@@ -582,6 +609,8 @@ def create_router() -> Router:
     router.callback_query.register(profile_callback, F.data == 'profile')
     router.callback_query.register(listen, F.data.regexp(r'^listen:[1-9][0-9]{0,17}$'))
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
+    router.callback_query.register(wuf_unlock, F.data.regexp(r'^wuf_unlock:[1-9][0-9]{0,17}$'))
+    router.callback_query.register(wuf_cooldown_info, F.data=='wuf_cooldown_info')
     router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))
     router.callback_query.register(navigate, F.data.regexp(
         r"^(catalog|genre:(?:litrpg|cultivation|isekai|science_magic|taming|comedy_isekai|audio)|(?:series|chapter|read):[1-9][0-9]{0,17}|page:[1-9][0-9]{0,17}:[0-9]{1,6})$"))

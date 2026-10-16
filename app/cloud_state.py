@@ -121,11 +121,14 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                         defaults = {'streak_days': 0, 'last_checkin_date': '',
                                     'player_xp':0,'player_rank':'F','chapters_read_count':0,
                                     'channel_sub_reward_claimed':0,'quiz_completed':0,'quiz_class_result':'',
-                                    'quiz_answers':'','quiz_session':'','last_read_series_id':None,'last_read_chapter_id':None}
+                                    'quiz_answers':'','quiz_session':'','last_read_series_id':None,'last_read_chapter_id':None,
+                                    'last_wuf_unlock_at':''}
                         missing_streak = set(columns) - set(row)
                         if not missing_streak <= defaults.keys():
                             raise ValueError('Invalid row schema: users')
                         row = {**row, **{k: defaults[k] for k in missing_streak}}
+                    if table == 'purchases' and isinstance(row, dict) and 'item_type' not in row:
+                        row = {**row, 'item_type': row.get('kind', 'chapter')}
                     if (not isinstance(row, dict) or set(row) != set(columns) or
                             any(type(v) not in (int, float, str, type(None)) for v in row.values())):
                         raise ValueError(f'Invalid row schema: {table}')
@@ -143,7 +146,7 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                     if existing == row:
                         continue
                     if table == 'purchases' and existing and any(existing[k] != row[k] for k in
-                            ('tg_id','chapter_id','amount_stars','telegram_payment_charge_id','kind')):
+                            ('tg_id','chapter_id','amount_stars','telegram_payment_charge_id','kind','item_type')):
                         raise ValueError('Purchase identity collision: refusing financial overwrite')
                     if table == 'users' and existing and existing['created_at'] != row['created_at']:
                         raise ValueError('Reader identity collision')

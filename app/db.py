@@ -3,6 +3,7 @@
 import asyncio
 import secrets
 import sqlite3
+import math
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -322,6 +323,19 @@ MIGRATIONS = (
     DROP TRIGGER IF EXISTS cashier_users_update;
     DROP TRIGGER IF EXISTS catalog_series_update;
     """,
+    """
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    DROP TRIGGER IF EXISTS cashier_purchases_update;
+    UPDATE purchases SET item_type=kind WHERE item_type='chapter' AND kind<>'chapter';
+    CREATE TABLE xp_events_stage29 (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap','subscription','quiz','wuf')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    INSERT INTO xp_events_stage29 SELECT tg_id,event_key,kind,amount FROM xp_events;
+    DROP TABLE xp_events;
+    ALTER TABLE xp_events_stage29 RENAME TO xp_events;
+    """,
 )
 
 
@@ -335,6 +349,28 @@ def active_vip(until: str | None) -> bool:
         return expiry > datetime.now(timezone.utc)
     except ValueError:
         return False
+
+
+def wuf_status(last_unlock: str, *, now: datetime | None = None) -> dict:
+    """UTC rolling 24-hour window; round up so a still-locked timer never reads 0m."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError('WUF clock must have a timezone')
+    if not last_unlock:
+        return {'available': True, 'remaining_seconds': 0, 'label': '⏳ Открыть бесплатно по суточному таймеру (Доступно!)'}
+    try:
+        last = datetime.fromisoformat(last_unlock.replace('Z', '+00:00'))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        remaining = max(0, math.ceil((last + timedelta(hours=24) - now).total_seconds()))
+    except (TypeError, ValueError, OverflowError):
+        return {'available': False, 'remaining_seconds': 86400,
+                'label': '⏳ Таймер временно недоступен. Напишите /support'}
+    if not remaining:
+        return wuf_status('', now=now)
+    minutes = math.ceil(remaining / 60)
+    return {'available': False, 'remaining_seconds': remaining,
+            'label': f'⏳ Бесплатно по таймеру через: {minutes // 60}ч {minutes % 60}м'}
 
 
 class Database:
@@ -369,6 +405,14 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 21:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    if 'last_wuf_unlock_at' not in columns:
+                        await self.connection.execute("ALTER TABLE users ADD COLUMN last_wuf_unlock_at TEXT NOT NULL DEFAULT ''")
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(purchases)')}
+                    if 'item_type' not in columns:
+                        await self.connection.execute("ALTER TABLE purchases ADD COLUMN item_type TEXT NOT NULL DEFAULT 'chapter' "
+                            "CHECK(item_type IN ('chapter','vip','bonus','wuf'))")
                 if index == 20:
                     columns={row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     for name in ('last_read_series_id','last_read_chapter_id'):
@@ -760,6 +804,46 @@ class Database:
                 "sent_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", (tg_id, series_id, chapter_num))
 
     @durable_write
+    async def unlock_with_wuf(self, tg_id: int, chapter_id: int, *, now: datetime | None = None) -> bool:
+        """Claim one permanent chapter per rolling day, atomic across SQLite connections."""
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError('WUF clock must have a timezone')
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                user = await self._one('SELECT * FROM users WHERE tg_id=?', (tg_id,))
+                chapter = await self._chapter(chapter_id)
+                if not user or not chapter or not chapter['is_published']:
+                    raise ValueError('Эта глава пока недоступна.')
+                if await self._can_read(tg_id, chapter):
+                    await self._suppress_paywalls(tg_id, chapter_id)
+                    await self.connection.commit()
+                    return False
+                checkout = await self._one("SELECT payload FROM payment_orders WHERE tg_id=? AND chapter_id=? "
+                    "AND state='approved' AND datetime(approved_at)>datetime('now','-10 minutes')", (tg_id, chapter_id))
+                if checkout:
+                    raise ValueError('Оплата этой главы уже обрабатывается. Дождитесь её завершения.')
+                status = wuf_status(user['last_wuf_unlock_at'], now=now)
+                if not status['available']:
+                    raise ValueError(status['label'])
+                cursor = await self.connection.execute("UPDATE users SET last_wuf_unlock_at=? WHERE tg_id=? "
+                    "AND (last_wuf_unlock_at='' OR julianday(last_wuf_unlock_at)<=julianday(?)-1)",
+                    (timestamp, tg_id, timestamp))
+                if cursor.rowcount != 1:
+                    raise ValueError('⏳ Бесплатный доступ по таймеру пока недоступен. Откройте главу заново.')
+                await self.connection.execute("INSERT INTO purchases(tg_id,chapter_id,amount_stars,kind,item_type,created_at) "
+                    "VALUES (?,?,0,'bonus','wuf',?)", (tg_id,chapter_id,timestamp))
+                await self._award_xp(tg_id, f'wuf:{chapter_id}', 'wuf')
+                await self._suppress_paywalls(tg_id, chapter_id)
+                await self.connection.commit()
+                return True
+            except BaseException:
+                await self.connection.rollback()
+                raise
+
+    @durable_write
     async def unlock_with_credit(self, tg_id: int, chapter_id: int) -> bool:
         async with self._lock:
             await self.connection.execute("BEGIN IMMEDIATE")
@@ -781,7 +865,7 @@ class Database:
                 ) as cursor:
                     if cursor.rowcount != 1:
                         raise ValueError("Бонусных ключей пока нет. Пригласите друга, чтобы получить ключ!")
-                await self.connection.execute("INSERT INTO purchases(tg_id, chapter_id, amount_stars, kind) VALUES (?, ?, 0, 'bonus')", (tg_id, chapter_id))
+                await self.connection.execute("INSERT INTO purchases(tg_id, chapter_id, amount_stars, kind, item_type) VALUES (?, ?, 0, 'bonus', 'bonus')", (tg_id, chapter_id))
                 await self._suppress_paywalls(tg_id, chapter_id)
                 await self.connection.commit()
                 return True
@@ -861,7 +945,7 @@ class Database:
                 until = (base + timedelta(days=days)).isoformat()
                 await self.connection.execute("UPDATE users SET is_vip_until = ? WHERE tg_id = ?", (until, tg_id))
                 await self.connection.execute(
-                    "INSERT INTO purchases(tg_id, chapter_id, amount_stars, telegram_payment_charge_id, kind, vip_days, vip_until) VALUES (?, 0, ?, ?, 'vip', ?, ?)",
+                    "INSERT INTO purchases(tg_id, chapter_id, amount_stars, telegram_payment_charge_id, kind, vip_days, vip_until, item_type) VALUES (?, 0, ?, ?, 'vip', ?, ?, 'vip')",
                     (tg_id, price, charge_id, days, until))
                 await self.connection.execute("UPDATE vip_orders SET state = 'paid' WHERE tg_id = ? AND payload = ?", (tg_id, payload))
                 await self._award_xp(tg_id,'purchase:'+charge_id,'purchase')
@@ -986,7 +1070,7 @@ class Database:
                                    (tg_id, chapter_id)) is not None
 
     async def _has_user_purchased(self, tg_id: int) -> bool:
-        return await self._one("SELECT id FROM purchases WHERE tg_id = ? LIMIT 1", (tg_id,)) is not None
+        return await self._one("SELECT id FROM purchases WHERE tg_id = ? AND item_type<>'wuf' LIMIT 1", (tg_id,)) is not None
 
     async def has_user_purchased(self, tg_id: int) -> bool:
         async with self._lock:

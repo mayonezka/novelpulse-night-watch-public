@@ -45,6 +45,7 @@ STAGES = (
     '26. Одноразовый ключ и +25 XP за проверенную подписку на канал; атомарная награда и синхронизация PC/Cloud.',
     '27. /quiz: четыре класса, одноразовый ключ +25 XP, пересылка результата и referral loop; YouTube после успеха каждые 6 часов.',
     '28. Жанровые полки, /start с быстрым возвратом, личная библиотека и честный прогресс завершённых глав; перенос в Cloud.',
+    '29. Wait-for-Free: одна бесплатная глава каждые 24 часа, таймер paywall, +15 XP и атомарный перенос в Cloud.',
 )
 
 
@@ -76,7 +77,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -137,6 +138,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 26: ' + state.get('stage26_verification','ещё не зафиксированы; см. data/stage26_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 27: ' + state.get('stage27_verification','ещё не зафиксированы; см. data/stage27_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 28: ' + state.get('stage28_verification','ещё не зафиксированы; см. data/stage28_full_tests.log и live-отчёт.'), '',
+        'Проверки Stage 29: ' + state.get('stage29_verification','ещё не зафиксированы; см. data/stage29_full_tests.log и live-отчёт.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)
     return text
