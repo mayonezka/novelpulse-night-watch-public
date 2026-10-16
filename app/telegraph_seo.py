@@ -5,7 +5,7 @@ import asyncio
 import json
 import hashlib
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import httpx
 
@@ -13,6 +13,34 @@ from app.db import Database
 
 API_URL = "https://api.telegra.ph"
 CONTENT_LIMIT = 64 * 1024
+PORTAL_URL = 'https://mayonezka.github.io/novelpulse-library/'
+BRIDGE_MARKER = '🌐 Библиотека NovelPulse · читать, искать и слушать'
+
+
+def portal_bridge_nodes(base_url: str = PORTAL_URL) -> list[dict]:
+    parsed = urlparse(base_url)
+    if parsed.scheme != 'https' or not parsed.netloc or parsed.query or parsed.fragment or parsed.username:
+        raise ValueError('Для SEO-моста нужен публичный HTTPS URL библиотеки')
+    base_url = base_url.rstrip('/') + '/'
+    children = [BRIDGE_MARKER]
+    for label, path in (
+        ('📚 Вся библиотека и поиск по сюжетам', ''),
+        ('⚔️ ЛитРПГ и Система', 'seo-litrpg'),
+        ('🌀 Исэкай и попаданцы', 'seo-isekai'),
+        ('⚡ Магия и технологии', 'seo-lightning'),
+        ('🎧 RSS аудиокниг', 'podcast.xml')):
+        # Static, locally generated destinations; no user query leaves the bot/site.
+        names = {'seo-litrpg':'seo_litrpg-system-2026.html', 'seo-isekai':'seo_popadancy-magic.html',
+                 'seo-lightning':'seo_lightning-science.html'}
+        children.extend([{'tag':'br'}, {'tag':'a','attrs':{'href':urljoin(base_url,names.get(path,path))},'children':[label]}])
+    return [{'tag':'blockquote','children':children}]
+
+
+def with_portal_bridge(nodes: list, base_url: str = PORTAL_URL) -> list:
+    """Replace only our identifiable footer, preserving the article's existing DOM."""
+    body = [n for n in nodes if not (isinstance(n,dict) and n.get('tag')=='blockquote'
+            and n.get('children',[None])[:1]==[BRIDGE_MARKER])]
+    return body + portal_bridge_nodes(base_url)
 
 
 class TelegraphError(ValueError):
@@ -65,6 +93,7 @@ def build_article_nodes(series: dict, chapters: list[dict], bot_username: str, *
         nodes.append({"tag": "p", "children": ["🧭 Другие новеллы: ", {"tag": "a", "attrs": {"href": hub_url}, "children": ["каталог и подборка NovelPulse"]}]})
     if channel_url:
         nodes.append({"tag": "p", "children": ["📢 Трейлеры и новые главы: ", {"tag": "a", "attrs": {"href": channel_url}, "children": ["Telegram-канал NovelPulse"]}]})
+    nodes = with_portal_bridge(nodes)
     encoded = json.dumps(nodes, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if enforce_limit and len(encoded) > CONTENT_LIMIT:
         raise ValueError(f"Две полные главы занимают {len(encoded)} байт DOM: лимит Telegraph 64 KiB; публикация без обрезки невозможна")
@@ -124,6 +153,7 @@ async def _publish_article(db, series, chapters, username, context, client, toke
                 for label, url in (("🧭 Подборка NovelPulse", context.get("hub_url")), ("📢 Telegram-канал", context.get("channel_url"))):
                     if url:
                         content_nodes.append({"tag": "p", "children": [{"tag": "a", "attrs": {"href": url}, "children": [label]}]})
+        content_nodes = with_portal_bridge(content_nodes)
         content = json.dumps(content_nodes, ensure_ascii=False, separators=(",", ":"))
         if len(content.encode()) > CONTENT_LIMIT:
             raise ValueError("Навигация превышает лимит страницы Telegraph")
@@ -239,9 +269,67 @@ def build_hub_nodes(series: list[dict], username: str, channel_url: str, hubs: l
     nodes.append({"tag": "p", "children": [{"tag": "a", "attrs": {"href": channel_url}, "children": ["📢 Telegram-канал NovelPulse: трейлеры и навигатор библиотеки"]}]})
     for hub in hubs or []:
         nodes.append({"tag": "p", "children": [{"tag": "a", "attrs": {"href": hub["url"]}, "children": [hub["title"]]}]})
+    nodes = with_portal_bridge(nodes)
     if len(json.dumps(nodes, ensure_ascii=False).encode()) > CONTENT_LIMIT:
         raise ValueError("SEO-хаб превышает лимит Telegraph 64 KiB")
     return nodes
+
+
+async def sync_portal_backlinks(db: Database, *, base_url: str = PORTAL_URL,
+                                client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Update every owned NovelPulse article, including multipart and old hub pages.
+
+    Read current remote DOM before editing; preserve full free chapters and existing links.
+    Successful updates are checkpointed individually and safe to repeat after interruption.
+    """
+    portal_bridge_nodes(base_url)
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await sync_portal_backlinks(db, base_url=base_url, client=owned)
+    async with db.seo_lock:
+        token = await db.get_state('telegraph_access_token')
+        if not token:
+            raise TelegraphError('Не найден аккаунт Telegraph')
+        pages, offset = [], 0
+        while True:
+            batch = await api_call(client, 'getPageList', {'access_token':token,'offset':offset,'limit':200})
+            rows = batch.get('pages')
+            if not isinstance(rows, list):
+                raise TelegraphError('Telegraph getPageList: INVALID_RESPONSE')
+            pages.extend(rows)
+            offset += len(rows)
+            if offset >= batch.get('total_count', offset) or not rows:
+                break
+        report = []
+        for item in pages:
+            url = item.get('url', '')
+            parsed = urlparse(url)
+            if parsed.scheme != 'https' or parsed.netloc != 'telegra.ph' or not parsed.path.strip('/'):
+                raise TelegraphError('Telegraph: некорректный URL собственной статьи')
+            page = await api_call(client, 'getPage', {'path':parsed.path.lstrip('/'),
+                'access_token':token,'return_content':'true'})
+            # getPage omits can_edit in the live API; authenticated getPageList provides it.
+            if item.get('can_edit') is not True or page.get('author_name') != 'NovelPulse':
+                raise TelegraphError('Telegraph: статья не подтверждена как собственная NovelPulse')
+            nodes = page.get('content')
+            if not isinstance(nodes, list) or not nodes:
+                raise TelegraphError('Telegraph: пустой DOM статьи')
+            updated = with_portal_bridge(nodes, base_url)
+            content = json.dumps(updated, ensure_ascii=False, separators=(',', ':'))
+            if len(content.encode()) > CONTENT_LIMIT:
+                raise TelegraphError('SEO-мост превышает лимит Telegraph: исходный текст сохранён')
+            changed = nodes != updated
+            if changed:
+                result = await api_call(client, 'editPage', {'access_token':token,
+                    'path':parsed.path.lstrip('/'),'title':page['title'],
+                    'author_name':page.get('author_name','NovelPulse'),
+                    'author_url':page.get('author_url',''),'content':content,'return_content':'true'})
+                if result.get('content') != updated:
+                    raise TelegraphError('Telegraph: изменённый DOM не подтверждён')
+            report.append({'url':url,'updated':changed,'verified':True,
+                'content_bytes':len(content.encode()),'links':len(portal_bridge_nodes(base_url)[0]['children'])//2})
+            await db.set_state('portal_backlink_sync', json.dumps(report, ensure_ascii=False))
+        return report
 
 
 async def publish_seo_cluster(db: Database, bot_username: str, channel_id: str | int, *,

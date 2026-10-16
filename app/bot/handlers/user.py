@@ -15,7 +15,8 @@ from app.config import Settings
 from app.db import Database, GENRES, wuf_status
 from app.text import split_text
 from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
-from app.gamification import notify_levelups, status_window
+from app.gamification import notify_levelups, status_window, leaderboard_window
+from app.search import TROPES, TROPE_IDS, search_catalog
 from app.notifications import notify_admins
 from app.quiz import question_card,result_card,recommended_series,referral_text
 from app.reviews import rating_line,review_button,register_handlers as register_reviews
@@ -92,6 +93,7 @@ async def show_catalog(bot: Bot, chat_id: int, db: Database, genre: str | None=N
         return
     for offset in range(0, len(series), 50):
         rows = genre_rows() if genre is None else []
+        rows.append([button('🔍 Поиск по сюжетам', 'search')])
         rows.extend([[button(item["title"][:100], f"series:{item['id']}")] for item in series[offset:offset + 50]])
         if genre:rows.append([button('🔙 Назад к каталогу','catalog')])
         rows.append([button('🔖 Моя полка','library')])
@@ -309,6 +311,7 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
             [button(RAID_LABEL, "referral")],
             [button("🎁 Дар Системы (Стрик)", "daily_gift")],
             [button('👤 Мой Ранг в Системе','profile')],
+            [button('🏆 Зал Славы','leaderboard')],
             [button('🔮 Узнать свой класс (Тест)','quiz')],
         ] + subscription_reward_rows(await db.get_user(message.from_user.id))))
 
@@ -464,6 +467,66 @@ async def myid(message: Message) -> None:
         await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
 
 
+async def show_leaderboard(bot: Bot, chat_id: int, tg_id: int, db: Database) -> None:
+    standings = await db.get_leaderboard(viewer_tg_id=tg_id)
+    resume = await db.resume_info(tg_id)
+    await send_text(bot, chat_id, leaderboard_window(standings), keyboard([
+        [button('⚔️ Призвать друга (+50 XP)', 'referral')],
+        [button('⚡ Взять VIP (+100 XP)', 'vip')],
+        [button('📖 Читать дальше (+10 XP)', f"read:{resume['id']}" if resume else 'catalog')],
+        [button('👤 Мой Ранг в Системе', 'profile')]]))
+
+
+async def leaderboard(message: Message, bot: Bot, db: Database) -> None:
+    if not message.from_user:
+        return
+    await db.ensure_user(message.from_user.id, message.from_user.username)
+    await show_leaderboard(bot, message.chat.id, message.from_user.id, db)
+
+
+async def leaderboard_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if isinstance(query.message, Message):
+        await db.ensure_user(query.from_user.id, query.from_user.username)
+        await show_leaderboard(bot, query.message.chat.id, query.from_user.id, db)
+
+
+async def show_search(bot: Bot, chat_id: int, db: Database, query: str = '', trope: str | None = None) -> None:
+    rows = [[button(label, f'trope:{slug}')] for slug, label, *_ in TROPES]
+    rows.append([button('🔙 Назад к каталогу', 'catalog')])
+    title = next((label for slug, label, *_ in TROPES if slug == trope), '🔍 Поиск по сюжетам')
+    await bot.send_message(chat_id, title + '\nВыберите троп или введите /search молния. Можно искать по названию главы.',
+        parse_mode=None, reply_markup=keyboard(rows))
+    if not query.strip() and trope is None:
+        return
+    results = search_catalog(await db.searchable_catalog(), query, trope)
+    await bot.send_message(chat_id, f'📚 Найдено новелл: {len(results)}' if results else
+        'Ничего не найдено. Попробуйте другой запрос или сюжетный фильтр.', parse_mode=None)
+    # Telegram's message and keyboard budgets stay bounded as the catalog grows.
+    for series in results[:25]:
+        actions = [button('📖 Читать', f"series:{series['id']}")]
+        if series['first_chapter_id']:
+            actions.append(button('🎧 Слушать', f"listen:{series['first_chapter_id']}"))
+        await bot.send_message(chat_id, f"📖 «{series['title'][:220]}»\n{series['genre_title']}\n{series['description'][:500]}",
+            parse_mode=None, reply_markup=keyboard([actions]))
+    if len(results) > 25:
+        await bot.send_message(chat_id, 'Показаны первые 25 новелл. Уточните запрос через /search.')
+
+
+async def search_command(message: Message, command: CommandObject, bot: Bot, db: Database) -> None:
+    await show_search(bot, message.chat.id, db, (command.args or '')[:120])
+
+
+async def search_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    trope = query.data.split(':', 1)[1] if query.data.startswith('trope:') else None
+    if trope is not None and trope not in TROPE_IDS:
+        return
+    await show_search(bot, query.message.chat.id, db, trope=trope)
+
+
 async def profile(message: Message, bot: Bot, db: Database) -> None:
     if not message.from_user:return
     await db.ensure_user(message.from_user.id,message.from_user.username)
@@ -471,7 +534,7 @@ async def profile(message: Message, bot: Bot, db: Database) -> None:
     user=await db.get_user(message.from_user.id)
     await message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
         subscription_reward_rows(user) + [[button('📸 Выложить карточку в Stories (+2 ключа!)','share_story_card')]
-        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('🏆 Зал Славы','leaderboard')], [button('📖 Каталог новелл','catalog')]]))
 
 
 async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -482,7 +545,7 @@ async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None
     user=await db.get_user(query.from_user.id)
     await query.message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
         subscription_reward_rows(user) + [[button('📸 Выложить карточку в Stories (+2 ключа!)','share_story_card')]
-        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('🏆 Зал Славы','leaderboard')], [button('📖 Каталог новелл','catalog')]]))
 
 
 async def share_story_card(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -663,10 +726,14 @@ def create_router() -> Router:
     router.message.register(start, CommandStart(), private)
     router.message.register(catalog, Command("catalog"), private)
     router.message.register(profile, Command('profile'), private)
+    router.message.register(leaderboard, Command('leaderboard'), private)
+    router.message.register(search_command, Command('search'), private)
     router.message.register(quiz_command, Command('quiz'), private)
     router.message.register(terms, Command("terms"), private)
     router.message.register(payment_support, Command("paysupport", "support"), private)
     router.callback_query.filter(F.message.chat.type == "private")
+    router.callback_query.register(leaderboard_callback, F.data == 'leaderboard')
+    router.callback_query.register(search_callback, F.data.regexp(r'^search$|^trope:(?:dungeons|technology|pets|hidden|cultivation|crafting)$'))
     router.callback_query.register(vip, F.data.in_(("vip", "vip_menu")))
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(daily_gift, F.data == "daily_gift")

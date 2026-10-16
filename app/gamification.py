@@ -61,3 +61,23 @@ async def rank_alert_loop(db, bot):
         except Exception as error:
             logging.getLogger(__name__).warning('Rank outbox deferred: %s',type(error).__name__)
         await asyncio.sleep(10)
+
+
+def leaderboard_window(standings: dict) -> str:
+    lines = ['🏆 ЗАЛ СЛАВЫ · РЕЙТИНГ ЧИТАТЕЛЕЙ', 'Места: XP → прочитанные главы; при равенстве порядок постоянный.', '']
+    for entry in standings['entries']:
+        medal = {1:'🥇',2:'🥈',3:'🥉'}.get(entry['position'], f"{entry['position']}.")
+        lines.append(f"{medal} {entry['name']} · [{entry['player_rank']}] · {entry['player_xp']} XP · {entry['chapters_read_count']} глав")
+    if not standings['entries']:
+        lines.append('Станьте первым читателем Зала Славы!')
+    viewer = standings.get('viewer')
+    if viewer:
+        lines.append(f"\n🎯 Ваше место среди читателей: №{viewer['position']} из {standings['total_players']} · {viewer['player_xp']} XP")
+    if standings['active_players'] < 5:
+        lines.extend(['', '🛡 Стражи Системы — учебные NPC, вне рейтинга читателей:',
+            'Страж Разлома · [D] · цель 150 XP', 'Хранитель Архива · [C] · цель 350 XP',
+            'Охотник за рунами · [B] · цель 750 XP'])
+    lines.extend(['', '⚡ Как подняться в Топ-3 Зала Славы?',
+        '• Любая покупка Stars / VIP: +100 XP', '• Призвать друга в Рейд: +50 XP',
+        '• Ежедневный стрик: +25 XP', '• Прочитанная глава / отзыв: +10..15 XP'])
+    return '\n'.join(lines)

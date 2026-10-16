@@ -15,10 +15,12 @@ from app.telegraph_seo import bot_link, channel_link
 from app.promotional_text import complete_excerpt
 from app.seo_hubs import SEO_HUBS,select_books
 from app.podcast_feed import write_podcast
+from app.search import search_attributes, web_search_widget, WEB_SEARCH_SCRIPT
 
 CSS = """
 :root{color-scheme:dark;--ink:#eaf0ec;--muted:#a6b5b0;--green:#b9f27c;--card:#152522}
 *{box-sizing:border-box}body{margin:0;background:#0a1513;color:var(--ink);font:18px/1.75 Georgia,serif}
+[hidden]{display:none!important}.catalog-search{padding:25px;border:1px solid #476038;border-radius:18px;margin-bottom:30px;font:16px/1.6 system-ui}.catalog-search label{display:block;font-weight:700;font-size:23px}.catalog-search input{width:100%;padding:15px;margin:14px 0;border-radius:10px;border:1px solid #779b68;background:#0a1513;color:var(--ink);font:inherit}.trope-pills{display:flex;flex-wrap:wrap;gap:9px}.trope-pills button{font:inherit;color:var(--ink);background:#152522;border:1px solid #779b68;border-radius:22px;padding:10px;cursor:pointer}.trope-pills button[aria-pressed=true]{background:#b9f27c;color:#10200b}button:focus-visible,input:focus-visible{outline:3px solid #eabb67;outline-offset:3px}
 a{color:var(--green);text-underline-offset:4px}header,main,footer{width:min(1120px,92%);margin:auto}
 header{padding:30px 0;display:flex;justify-content:space-between;align-items:center;gap:20px;font:14px/1.5 system-ui}
 .brand{font-size:24px;font-weight:800;letter-spacing:-1px;text-decoration:none}.brand span{color:var(--green)}
@@ -100,6 +102,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     series_list = await db.list_series()
+    search_rows = {s['id']: s for s in await db.searchable_catalog()}
     hubs = json.loads(await db.get_state('seo_hubs') or '[]')
     previews = json.loads(await db.get_state('web_audio_previews') or '{}')
     chapter_previews=json.loads(await db.get_state('chapter_audio_previews') or '{}')
@@ -165,7 +168,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             canonical=urljoin(base, filename) if public else '', channel_url=channel, schema=schema, sticky=sticky), encoding='utf-8')
         files.append(filename)
         iv = f'<a href="{escape(series["telegraph_url"])}">Instant View ↗</a>' if series['telegraph_url'] else ''
-        cards.append(f'<section class="card"><div class="eyebrow">Мир {series["id"]:02d} · Первые главы бесплатно</div>'
+        cards.append(f'<section class="card" {search_attributes(search_rows[series["id"]], "book")}><div class="eyebrow">Мир {series["id"]:02d} · Первые главы бесплатно</div>'
                      f'<h2><a href="{filename}">{escape(series["title"])}</a></h2><p>{escape(complete_excerpt(series["description"], 550))}</p>'
                      f'<details><summary>Главы · {len(published)}</summary><ol>{"".join(chapter_links)}</ol></details>'
                      f'<div class="actions"><a class="cta" href="{link}">Читать в @{escape(bot_username)}</a>{iv}</div></section>')
@@ -199,7 +202,9 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         (directory/name).write_text(shell(title+' | NovelPulse',intro,body,
             canonical=urljoin(base,name) if public else '',channel_url=channel,schema=schema),encoding='utf-8')
         files.append(name)
-        genre_links.append(f'<a href="{name}">{escape(title)}</a>')
+        hub_search={'title':title,'description':intro,'genre_slug':' '.join(genres),
+            'chapter_titles':' '.join(search_rows[b['series']['id']]['chapter_titles'] or '' for b in selection)}
+        genre_links.append(f'<a href="{name}" {search_attributes(hub_search, "hub")}>{escape(title)}</a>')
     dates=json.loads(await db.get_state('podcast_first_published') or '{}')
     audio_files=write_podcast(directory,books,previews,base,bot_username,dates)
     await db.set_state('podcast_first_published',json.dumps(dates))
@@ -208,9 +213,9 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             '<h1>Ещё одна глава.<br>Ещё один новый мир.</h1><p>Герои нулевого ранга, опасные системы и приключения, '
             'от которых трудно оторваться. Откройте библиотеку русских переводов — первые главы читаются бесплатно.</p>'
             f'<span class="pill">{len(series_list)} новелл</span><span class="pill">Первая покупка — 1 ⭐️</span></section>'
-            '<div class="grid">' + ''.join(cards) + '</div>' +
+            + web_search_widget() + '<div class="grid">' + ''.join(cards) + '</div>' +
             f'<section class="links"><h2>24 маршрута: выбрать, читать и слушать</h2>{"".join(genre_links)}</section>'
-            f'<section class="links"><h2>Подборки и подкаст</h2><a href="podcast.xml">🎧 RSS аудиопревью NovelPulse Audio</a>{hub_links}</section>')
+            f'<section class="links"><h2>Подборки и подкаст</h2><a href="podcast.xml">🎧 RSS аудиопревью NovelPulse Audio</a>{hub_links}</section>' + WEB_SEARCH_SCRIPT)
     (directory / 'index.html').write_text(shell('NovelPulse — веб-новеллы и ЛитРПГ на русском',
         'Библиотека русских переводов: ЛитРПГ, Исэкай, Система. Первые главы бесплатно, продолжение в Telegram.',
         body, canonical=urljoin(base, 'index.html') if public else '', channel_url=channel,

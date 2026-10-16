@@ -892,6 +892,39 @@ class Database:
                 await self.connection.rollback()
                 raise
 
+    async def get_leaderboard(self, limit=10, viewer_tg_id=None) -> dict:
+        """Stable human standings; only masked labels leave the database boundary."""
+        from app.gamification import rank_for_xp
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError('Leaderboard limit must be between 1 and 50')
+        async with self._lock:
+            rows = await self._all('''WITH ranked AS (
+                SELECT tg_id,username,player_xp,chapters_read_count,
+                  ROW_NUMBER() OVER (ORDER BY player_xp DESC,chapters_read_count DESC,tg_id ASC) position
+                FROM users) SELECT * FROM ranked WHERE position<=? OR tg_id=? ORDER BY position''',
+                (limit, viewer_tg_id))
+            totals = await self._one('SELECT COUNT(*) total,COALESCE(SUM(player_xp>0),0) active FROM users')
+        def public(row):
+            own = row['tg_id'] == viewer_tg_id
+            # Never reveal IDs or full usernames, even through a response serialized for logging.
+            name = 'Вы' if own else ('Игрок ' + (row['username'][:1].upper() if row['username'] else 'Н') + '***')
+            return {'position':row['position'],'name':name,'is_viewer':own,
+                'player_xp':row['player_xp'],'chapters_read_count':row['chapters_read_count'],
+                'player_rank':rank_for_xp(row['player_xp'])['rank']}
+        return {'entries':[public(r) for r in rows if r['position']<=limit],
+            'viewer':next((public(r) for r in rows if r['tg_id']==viewer_tg_id),None),
+            'total_players':totals['total'],'active_players':totals['active']}
+
+    async def searchable_catalog(self) -> list[dict]:
+        """Only published public metadata; bodies and reader records are excluded."""
+        async with self._lock:
+            return await self._all('''SELECT s.*,
+                (SELECT GROUP_CONCAT(c.title,' ') FROM chapters c WHERE c.series_id=s.id AND c.is_published=1) chapter_titles,
+                (SELECT c.id FROM chapters c WHERE c.series_id=s.id AND c.is_published=1
+                 ORDER BY c.chapter_num,c.id LIMIT 1) first_chapter_id
+                FROM series s WHERE EXISTS (SELECT 1 FROM chapters c WHERE c.series_id=s.id AND c.is_published=1)
+                ORDER BY s.id''')
+
     async def get_user(self, tg_id: int) -> dict[str, Any] | None:
         async with self._lock:
             return await self._one("SELECT * FROM users WHERE tg_id = ?", (tg_id,))

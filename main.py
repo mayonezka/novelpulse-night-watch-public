@@ -92,6 +92,8 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                 BotCommand(command="start", description="Открыть NovelPulse"),
                 BotCommand(command="catalog", description="Каталог новелл"),
                 BotCommand(command="profile", description="Мой Ранг в Системе"),
+                BotCommand(command="leaderboard", description="Зал Славы читателей"),
+                BotCommand(command="search", description="Поиск новелл по сюжетам и словам"),
                 BotCommand(command="quiz", description="Узнать свой скрытый класс"),
                 BotCommand(command="review", description="Оценить новеллу и оставить отзыв"),
                 BotCommand(command="myid", description="Узнать свой Telegram ID"),
