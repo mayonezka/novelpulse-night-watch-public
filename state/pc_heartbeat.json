@@ -1,10 +1,10 @@
 {
-  "cloud_lease_until": "2026-10-16T10:01:50.381153+00:00",
-  "cloud_run_id": "38883985806",
-  "epoch": "19d27c104358410fb74aa78d771c55a7",
+  "cloud_lease_until": "2026-10-16T10:25:49.244751+00:00",
+  "cloud_run_id": "38886688187",
+  "epoch": "7b976ad8c5294f6e8987a9b6b357968f",
   "heartbeat_interval_seconds": 45,
   "host": "pc",
-  "lease_owner": null,
+  "lease_owner": "cloud",
   "lease_ttl_seconds": 120,
   "pc_runtime": {
     "executable": "pythonw.exe",
