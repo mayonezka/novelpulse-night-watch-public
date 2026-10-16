@@ -366,7 +366,8 @@ async def run_pipeline(url: str, settings: PipelineSettings, *, db: Database | N
 async def fetch_trending_royalroad(limit_series: int = 1, limit_chapters: int = 5, *,
                                    settings: PipelineSettings | None = None, db: Database | None = None,
                                    client: httpx.AsyncClient | None = None, mock_translate: bool = False,
-                                   on_error: Callable[[str, str], Awaitable[None]] | None = None) -> list[PipelineResult]:
+                                   on_error: Callable[[str, str], Awaitable[None]] | None = None,
+                                   allow_fallback: bool = True) -> list[PipelineResult]:
     if limit_series < 1 or limit_chapters < 1:
         raise ValueError("Лимиты новелл и глав должны быть положительными")
     settings = settings or PipelineSettings()
@@ -375,18 +376,22 @@ async def fetch_trending_royalroad(limit_series: int = 1, limit_chapters: int = 
         await owned_db.open()
         try:
             return await fetch_trending_royalroad(limit_series, limit_chapters, settings=settings, db=owned_db,
-                                                 client=client, mock_translate=mock_translate, on_error=on_error)
+                                                 client=client, mock_translate=mock_translate, on_error=on_error,
+                                                 allow_fallback=allow_fallback)
         finally:
             await owned_db.close()
     if client is None:
         async with httpx.AsyncClient(timeout=30, transport=SourceTransport()) as owned_client:
             return await fetch_trending_royalroad(limit_series, limit_chapters, settings=settings, db=db,
-                                                 client=owned_client, mock_translate=mock_translate, on_error=on_error)
+                                                 client=owned_client, mock_translate=mock_translate, on_error=on_error,
+                                                 allow_fallback=allow_fallback)
     try:
         response = await request_with_retry(client, "GET", TRENDING_URL, timeout=30, follow_redirects=True,
                                             headers=BROWSER_HEADERS)
     except (httpx.HTTPError, ValueError) as error:
         reason = failure_reason(error)
+        if not allow_fallback:
+            raise ValueError("RoyalRoad недоступен: " + reason) from error
         logger.warning("RoyalRoad недоступен: %s; пробую Reddit HFY", reason)
         if on_error:
             await on_error(TRENDING_URL, reason + "; переключаюсь на Reddit HFY")
@@ -435,8 +440,12 @@ async def fetch_trending_royalroad(limit_series: int = 1, limit_chapters: int = 
                 break
         if len(results) >= limit_series:
             break
-    if (not found or (failures and len(results) < limit_series)
-            or (not results and response.headers.get("X-NovelPulse-Acquisition") == "browser-cache")):
+    needs_fallback = (not found or (failures and len(results) < limit_series)
+            or (not results and response.headers.get("X-NovelPulse-Acquisition") == "browser-cache"))
+    if needs_fallback and not allow_fallback and not results:
+        detail = "; ".join(failures) if failures else "все доступные позиции Trending уже импортированы"
+        raise ValueError("Новая RoyalRoad-новелла с требуемым числом глав не найдена: " + detail)
+    if needs_fallback and allow_fallback:
         remaining = await fetch_trending_hfy(limit_series - len(results), limit_chapters,
                     settings=settings, db=db, client=client, mock_translate=mock_translate, on_error=on_error)
         results.extend(remaining)

@@ -37,7 +37,7 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
         if not series or not series.get('source_url'):
             continue
         try:
-            target_total = 10 if series_id in (3, 4) else 8
+            target_total = 10 if series_id in (3, 4, 5, 6) else 8
             before_list = await db.list_chapters(series_id)
             if len(before_list) >= target_total:
                 before = [await db.get_chapter(row['id']) for row in before_list]
@@ -66,6 +66,108 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
             from app.pipeline import failure_reason
             errors.append({'series_id': series_id, 'reason': failure_reason(error)})
     return {'updated': results, 'errors': errors}
+
+
+def _genre_for_series(title: str, description: str) -> tuple[str, str]:
+    """Map an imported title to one of the existing smart-catalog shelves."""
+    from app.db import GENRES
+    text = (title + ' ' + description).casefold()
+    rules = (
+        ('cultivation', ('cultivat', 'spirit garden', 'immortal', 'martial', 'культивац', 'садовниц')),
+        ('science_magic', ('railgun', 'lightning', 'science', 'engineer', 'technology', 'рельсотрон', 'молни', 'науч')),
+        ('taming', ('taming', 'tamer', 'beast', 'pet', 'evolution', 'укрот', 'прируч', 'эволюц')),
+        ('comedy_isekai', ('saint', 'comedy', 'humor', 'свят', 'комеди', 'юмор')),
+        ('isekai', ('isekai', 'reincarnat', 'transmigrat', 'another world', 'попадан', 'исэкай', 'перерожд')),
+    )
+    for slug, needles in rules:
+        if any(needle in text for needle in needles):
+            return slug, GENRES[slug][0]
+    return 'litrpg', GENRES['litrpg'][0]
+
+
+async def import_trending_royalroad_series(db, settings, *, client=None, chapter_count: int = 6) -> dict:
+    """Import a new RoyalRoad series only, using the zero-key batched clients5 translator."""
+    if chapter_count < 3:
+        raise ValueError('Для SEO-страницы нужны минимум три главы')
+    import httpx
+    from app.pipeline import fetch_trending_royalroad
+    from app.source_transport import SourceTransport
+    if client is None:
+        async with httpx.AsyncClient(timeout=45, transport=SourceTransport()) as owned:
+            return await import_trending_royalroad_series(db, settings, client=owned, chapter_count=chapter_count)
+    translation_settings = settings.model_copy(update={'llm_api_key': None})
+    before = {item['id'] for item in await db.list_all_series()}
+    try:
+        results = await fetch_trending_royalroad(1, chapter_count, settings=translation_settings,
+            db=db, client=client, allow_fallback=False)
+    except BaseException:
+        await _discard_new_series(db, before)
+        raise
+    new = [result for result in results if result.series_id not in before]
+    if len(new) != 1:
+        await _discard_new_series(db, before)
+        raise ValueError('Trending не добавил ровно одну новую RoyalRoad-новеллу')
+    try:
+        series = await db.get_series(new[0].series_id)
+        chapters = [await db.get_chapter(item['id']) for item in await db.list_chapters(series['id'])]
+        chapters = [row for row in chapters if row]
+        expected = set(range(1, chapter_count + 1))
+        nums = {row['chapter_num'] for row in chapters}
+        invalid = [row['chapter_num'] for row in chapters if not row['is_published']
+            or (row['chapter_num'] > 2 and row['price_stars'] != 10)
+            or not _has_cyrillic(row['title'] + '\n' + row['content_text'])]
+        if not expected.issubset(nums) or invalid:
+            raise ValueError(f'Новая серия не прошла проверку глав/RU/цены: missing={sorted(expected-nums)}, invalid={invalid}')
+        slug, genre_title = _genre_for_series(series['title'], series['description'])
+        async with db._lock:
+            await db.connection.execute('UPDATE series SET genre_slug=?, genre_title=? WHERE id=?',
+                                        (slug, genre_title, series['id']))
+            await db.connection.commit()
+        # If Trending returned a later successful title after a partial source, discard only the
+        # other IDs created by this run so the catalog does not retain a broken stub.
+        await _discard_new_series(db, before, keep={series['id']})
+        return {'series_id': series['id'], 'title': series['title'], 'source_url': series['source_url'],
+            'chapter_nums': sorted(expected), 'chapter_count': len(chapters),
+            'free_chapters_limit': series['free_chapters_limit'], 'genre_slug': slug,
+            'genre_title': genre_title, 'mode': new[0].mode}
+    except BaseException:
+        await _discard_new_series(db, before)
+        raise
+
+
+async def _discard_new_series(db, previous_ids: set[int], *, keep: set[int] | None = None) -> None:
+    keep = keep or set()
+    created = [item['id'] for item in await db.list_all_series()
+               if item['id'] not in previous_ids and item['id'] not in keep]
+    if not created:
+        return
+    async with db._lock:
+        for series_id in created:
+            await db.connection.execute('DELETE FROM chapters WHERE series_id=?', (series_id,))
+            await db.connection.execute('DELETE FROM series WHERE id=?', (series_id,))
+        await db.connection.commit()
+
+
+async def plan_series_short_metadata(db, series_id: int, username: str, channel_id,
+                                     *, output_dir=SHORTS_DIR, portal_url='') -> list[dict]:
+    """Queue three JIT upload plans without rendering a video or creating any media file."""
+    from app.shorts import short_copy, viral_filename
+    from app.telegraph_seo import channel_link
+    directory = Path(output_dir).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    series = await db.get_series(series_id)
+    if not series:
+        raise ValueError('Новелла для очереди не найдена')
+    channel_url = channel_link(channel_id) if isinstance(channel_id, str) else ''
+    plans = []
+    for episode in (1, 2, 3):
+        filename = viral_filename(series, episode)
+        path = directory / filename
+        _, description = short_copy(series, episode, username, channel_url, portal_url)
+        short_id = await db.save_short(series_id, episode, str(path), path.stem, description)
+        plans.append({'id': short_id, 'episode_num': episode, 'title': path.stem,
+                      'video_path': str(path), 'status': 'pending'})
+    return plans
 
 
 async def replenish_content_queue(db, bot, settings, *, output_dir=SHORTS_DIR):

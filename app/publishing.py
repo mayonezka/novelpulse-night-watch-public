@@ -198,6 +198,72 @@ async def publish_chapter_release_digest(db, bot, channel_id):
         'series_count': len(series), 'notified_readers': readers}
 
 
+async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: int,
+                                          updated_series: list[dict]) -> dict:
+    """Announce a verified catalog expansion and refresh the existing pinned navigator once."""
+    from aiogram.types import LinkPreviewOptions
+    from app.autopilot import build_navigator
+    series = await db.list_series()
+    new_series = await db.get_series(new_series_id)
+    if not new_series or not new_series.get('telegraph_url'):
+        raise ValueError('У новой новеллы должны быть опубликованная статья Telegraph и ссылка Instant View')
+    if any(not item.get('telegraph_url') for item in series):
+        raise ValueError('Нельзя обновить навигатор до публикации Instant View для всего каталога')
+    username = (await bot.get_me()).username
+    from app.telegraph_seo import bot_link, channel_link
+    channel_url = channel_link(channel_id)
+    lines = ['🔥 Свежий релиз в NovelPulse!', '', f"📚 Новая новелла: «{new_series['title']}»"]
+    if new_series.get('description'):
+        lines.extend(['', new_series['description'][:450]])
+    lines.extend(['', f"⚡ Instant View: {new_series['telegraph_url']}",
+                  f"📖 Читать в боте: {bot_link(username, new_series_id)}"])
+    if updated_series:
+        lines.extend(['', '⚡ Новые переведённые главы:'])
+        for item in updated_series:
+            nums = sorted(set(item.get('chapter_nums', [])))
+            if nums:
+                lines.append(f"• {item['title'][:130]} — главы {', '.join(map(str, nums))}")
+    lines.extend(['', '⚡ VIP на 24 часа — 19 ⭐️ · 👑 VIP на 7 дней — 49 ⭐️',
+                  f"📢 Новые главы и трейлеры: {channel_url}"])
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='📖 Читать новую новеллу', url=bot_link(username, new_series_id))],
+        [InlineKeyboardButton(text='⚡ Открыть Instant View', url=new_series['telegraph_url'])],
+    ])
+    signature = hashlib.sha256(json.dumps({
+        'series_id': new_series_id,
+        'chapters': [(item.get('id'), sorted(set(item.get('chapter_nums', [])))) for item in updated_series],
+        'catalog': [(item['id'], len(await db.list_chapters(item['id']))) for item in series],
+    }, sort_keys=True).encode()).hexdigest()
+    key = 'stage31_catalog_release_receipt'
+    prior = json.loads(await db.get_state(key) or '{}')
+    if prior.get('signature') == signature and prior.get('message_id'):
+        message_id = prior['message_id']
+    else:
+        sent = await bot.send_message(channel_id, '\n'.join(lines), parse_mode=None,
+            reply_markup=markup, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        message_id = sent.message_id
+        await db.set_state(key, json.dumps({'signature': signature, 'message_id': message_id,
+            'state': 'sent', 'series_id': new_series_id}, ensure_ascii=False))
+    hubs = json.loads(await db.get_state('seo_hubs') or '[]')
+    deployment = json.loads(await db.get_state('public_web_deployment') or '{}')
+    portal_url = deployment.get('base_url', '') if deployment.get('status') == 'live' else ''
+    for item in series:
+        item['chapter_count'] = len(await db.list_chapters(item['id']))
+    total_chapters = sum(item['chapter_count'] for item in series)
+    navigator = build_navigator(series, username, hubs, portal_url, total_chapters)
+    chat = await bot.get_chat(channel_id)
+    pinned = getattr(chat, 'pinned_message', None)
+    if pinned is not None and pinned.message_id != 12:
+        raise ValueError(f'Ожидался навигатор #12 в закрепе, Telegram показывает #{pinned.message_id}')
+    await bot.edit_message_text(navigator, chat_id=channel_id, message_id=12, parse_mode='HTML',
+        link_preview_options=LinkPreviewOptions(is_disabled=True))
+    await bot.pin_chat_message(chat_id=channel_id, message_id=12, disable_notification=True)
+    await db.set_state(f'channel_navigator:{channel_id}', json.dumps({
+        'message_id': 12, 'pinned': True, 'digest': hashlib.sha256(navigator.encode()).hexdigest(), 'state': 'sent'}))
+    return {'message_id': message_id, 'navigator_message_id': 12, 'series_count': len(series),
+        'chapter_count': total_chapters}
+
+
 async def publish_story_poll(db,bot,channel_id,short_id,video_message_id):
     """One native anonymous reply. Never retry a network-ambiguous submission."""
     destination=str(channel_id)
