@@ -2,9 +2,9 @@
   "active_epoch": null,
   "drained_epoch": null,
   "mode": "HOT_STANDBY",
-  "pc_lease_seconds": 120,
-  "poll_seconds": 20,
+  "pc_lease_seconds": 45,
+  "poll_seconds": 6,
   "protocol": 17,
-  "run_id": "38897677259",
-  "updated_at": "2026-10-16T14:28:25.859879+00:00"
+  "run_id": "38915983740",
+  "updated_at": "2026-10-16T14:28:53.049284+00:00"
 }
