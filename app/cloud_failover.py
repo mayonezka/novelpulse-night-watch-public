@@ -248,7 +248,7 @@ class CloudFailover:
             raise LeaseLost('Polling lease transferred; standing down')
         return value
 
-    async def flush(self, *, state='active', force=False):
+    async def flush(self, *, state='active', force=False, update_status=True):
         async with self.flush_lock:
             if self.role == 'pc':
                 await self.sync_catalog()
@@ -270,7 +270,8 @@ class CloudFailover:
                     await self.github.write(DELTA,sealed,sha)
                     await self.db.set_state('cashier_durable_anchor',json.dumps(sealed))
                     self.last_revision, self.last_runtime = payload['revision'], runtime
-                    await self.save_status('synchronized')
+                    if update_status:
+                        await self.save_status('synchronized')
                     return
                 except CASConflict:
                     if attempt == 4:
@@ -468,20 +469,20 @@ class CloudFailover:
         if self.role!='pc' or not self.owned:
             return False
         try:
-            await asyncio.wait_for(self.flush(state='stopped',force=True),timeout=.75)
+            await asyncio.wait_for(self.flush(state='stopped',force=True,update_status=False),timeout=.95)
         except Exception as error:
             logger.warning('Power-event cashier flush did not finish: %s',type(error).__name__)
         try:
-            value,sha=await asyncio.wait_for(self.github.read(HEARTBEAT),timeout=.35)
+            value,sha=await asyncio.wait_for(self.github.read(HEARTBEAT),timeout=.25)
             if value.get('epoch')!=self.session:
                 return False
             value.update(status='offline',lease_owner=None,updated_at=utc_now().isoformat(),
                          phase='stopped',reason=reason)
-            await asyncio.wait_for(self.github.write(HEARTBEAT,value,sha),timeout=.5)
+            await asyncio.wait_for(self.github.write(HEARTBEAT,value,sha),timeout=.4)
             self.owned=False
             try:
                 await asyncio.wait_for(self.github.request('POST','actions/workflows/night_watch.yml/dispatches',
-                    json={'ref':'main'}),timeout=.25)
+                    json={'ref':'main'}),timeout=.15)
             except Exception:
                 pass
             return True
