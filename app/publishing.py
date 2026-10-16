@@ -201,6 +201,7 @@ async def publish_chapter_release_digest(db, bot, channel_id):
 async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: int,
                                           updated_series: list[dict]) -> dict:
     """Announce a verified catalog expansion and refresh the existing pinned navigator once."""
+    from aiogram.exceptions import TelegramBadRequest
     from aiogram.types import LinkPreviewOptions
     from app.autopilot import build_navigator
     series = await db.list_series()
@@ -255,8 +256,12 @@ async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: in
     pinned = getattr(chat, 'pinned_message', None)
     if pinned is not None and pinned.message_id != 12:
         raise ValueError(f'Ожидался навигатор #12 в закрепе, Telegram показывает #{pinned.message_id}')
-    await bot.edit_message_text(navigator, chat_id=channel_id, message_id=12, parse_mode='HTML',
-        link_preview_options=LinkPreviewOptions(is_disabled=True))
+    try:
+        await bot.edit_message_text(navigator, chat_id=channel_id, message_id=12, parse_mode='HTML',
+            link_preview_options=LinkPreviewOptions(is_disabled=True))
+    except TelegramBadRequest as error:
+        if 'message is not modified' not in str(error).casefold():
+            raise
     await bot.pin_chat_message(chat_id=channel_id, message_id=12, disable_notification=True)
     await db.set_state(f'channel_navigator:{channel_id}', json.dumps({
         'message_id': 12, 'pinned': True, 'digest': hashlib.sha256(navigator.encode()).hexdigest(), 'state': 'sent'}))

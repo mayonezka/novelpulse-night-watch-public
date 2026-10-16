@@ -71,7 +71,10 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
 def _genre_for_series(title: str, description: str) -> tuple[str, str]:
     """Map an imported title to one of the existing smart-catalog shelves."""
     from app.db import GENRES
-    text = (title + ' ' + description).casefold()
+    # Descriptions often mention ordinary monsters, pets, or magic in passing.
+    # Use the title for shelf assignment; a broad description match mislabels
+    # general progression LitRPG as taming or cultivation.
+    text = title.casefold()
     rules = (
         ('cultivation', ('cultivat', 'spirit garden', 'immortal', 'martial', 'культивац', 'садовниц')),
         ('science_magic', ('railgun', 'lightning', 'science', 'engineer', 'technology', 'рельсотрон', 'молни', 'науч')),
