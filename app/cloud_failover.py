@@ -489,7 +489,7 @@ class CloudFailover:
             released=False
             if self.heartbeat_thread:
                 released=await asyncio.wait_for(asyncio.to_thread(
-                    self.heartbeat_thread.publish_offline_sync,reason,timeout=.65),timeout=.8)
+                    self.heartbeat_thread.publish_offline_sync,reason,timeout=1.15),timeout=1.3)
             if not released:
                 value,sha=await asyncio.wait_for(self.github.read(HEARTBEAT),timeout=.35)
                 if value.get('epoch')!=self.session:return False

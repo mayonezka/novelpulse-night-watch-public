@@ -79,7 +79,7 @@ class PCHeartbeatThread:
         self.cache_heartbeat(value,new_sha)
         return True
 
-    def publish_offline_sync(self,reason,*,timeout=.8):
+    def publish_offline_sync(self,reason,*,timeout=1.15):
         """One-request lease release using the SHA cached by the lease publisher."""
         with self._cache_lock:
             sha=self.last_sha

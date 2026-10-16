@@ -27,6 +27,7 @@ class HotStandby:
         self.last_publish=-1e9
         self.drained_epoch=None
         self.transitions=[]
+        self.runner_sha=None
 
     async def publish(self,mode,*,epoch=None,force=False):
         if mode==self.mode and self.clock()-self.last_publish<60 and not force:
@@ -37,18 +38,22 @@ class HotStandby:
         # Contents API commits share a branch ref even for different files. The
         # cashier lease renewal may commit concurrently with this cosmetic marker.
         for attempt in range(5):
+            if self.runner_sha is None:
+                try:
+                    _,sha=await self.github.read(RUNNER)
+                except RuntimeError as error:
+                    if 'HTTP 404' not in str(error): raise
+                    sha=None
+                except KeyError:
+                    sha=None
+            else:
+                sha=self.runner_sha
             try:
-                _,sha=await self.github.read(RUNNER)
-            except RuntimeError as error:
-                if 'HTTP 404' not in str(error): raise
-                sha=None
-            except KeyError:
-                sha=None
-            try:
-                await self.github.write(RUNNER,value,sha)
+                self.runner_sha=await self.github.write(RUNNER,value,sha)
                 break
             except CASConflict:
                 if attempt==4:raise
+                _,self.runner_sha=await self.github.read(RUNNER)
                 await self.sleep(.2*(attempt+1))
         if mode!=self.mode:
             logger.info('Night-Watch transition: %s -> %s',self.mode,mode)
@@ -66,7 +71,6 @@ class HotStandby:
                         await self.publish('HOT_STANDBY')
                         await self.sleep(self.poll_seconds)
                         continue
-                    await self.publish('ACQUIRING')
                     async def ready(epoch):
                         await self.publish('ACTIVE_CASHIER',epoch=epoch,force=True)
                     remaining=max(1,deadline-self.clock()-30)
