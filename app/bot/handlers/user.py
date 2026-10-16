@@ -20,7 +20,8 @@ from app.search import TROPES, TROPE_IDS, search_catalog
 from app.notifications import notify_admins
 from app.quiz import question_card,result_card,recommended_series,referral_text
 from app.reviews import rating_line,review_button,register_handlers as register_reviews
-from app.referrals import RAID_LABEL,raid_share_url
+from app.referrals import RAID_LABEL,raid_share_url,announce_reading_reward
+from app.analytics import acquisition_source
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
 PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
@@ -58,6 +59,16 @@ def render_player_story_card(user_row: dict, series_title: str = ''):
 
 def subscription_reward_rows(user: dict | None) -> list[list[InlineKeyboardButton]]:
     return [[button(SUBSCRIPTION_LABEL, 'claim_sub_key')]] if user and not user.get('channel_sub_reward_claimed', 0) else []
+
+
+def profile_markup(user: dict) -> InlineKeyboardMarkup:
+    return keyboard([
+        [button('🔖 Моя полка','library')], [button('🔮 Тест класса (+50 XP)','quiz')],
+        [button('🏆 Зал Славы','leaderboard')], [button('🎁 Стрик','daily_gift')],
+        [button('📸 Карточка Stories (+50 XP)','share_story_card')],
+        [button('⚔️ Совместный Рейд','referral')],
+        *subscription_reward_rows(user), *[[button(label,data)] for label,data in vip_options(user)],
+        [button('📖 Каталог новелл','catalog')]])
 
 
 async def send_text(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
@@ -184,7 +195,8 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         else:
             await bot.send_message(chat_id, text, parse_mode=None, reply_markup=markup)
         if chat_id == tg_id:
-            await db.record_read(tg_id, chapter["series_id"], chapter["chapter_num"],completed=page==len(pages)-1)
+            inviter=await db.record_read(tg_id, chapter["series_id"], chapter["chapter_num"],completed=page==len(pages)-1)
+            await announce_reading_reward(bot,db,tg_id,inviter)
             await notify_levelups(bot,db,tg_id)
     else:
         teaser = deep_peek_excerpt(chapter['content_text']) if deep_peek else chapter["content_text"][:300]
@@ -204,7 +216,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
                       "и читать ВСЕ главы всех новелл без ограничений.") if offer["has_purchased"] else ""
         rows = []
         rows.extend(subscription_reward_rows(account))
-        rows.append([button('📸 Выложить карточку в Stories (+2 ключа!)', 'share_story_card')])
+        rows.append([button('📸 Карточка Stories (+50 XP)', 'share_story_card')])
         if not await db.has_used_peek(tg_id, chapter_id):
             rows.append([button(PEEK_LABEL, f'peek:{chapter_id}')])
         timer = wuf_status(account['last_wuf_unlock_at'] if account else '')
@@ -236,6 +248,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
             await send_text(bot, chat_id, text, keyboard(rows))
         if chat_id == tg_id:
             await db.log_paywall_view(tg_id, chapter_id)
+            await db.record_funnel_event(tg_id,'view_paywall',chapter['series_id'],chapter_id)
             await db.remember_chapter(tg_id,chapter_id)
 
 
@@ -253,7 +266,6 @@ async def listen(query: CallbackQuery, bot: Bot, db: Database, audio_jobs, cashi
     if not await db.can_read(query.from_user.id, chapter):
         await show_chapter(bot,query.message.chat.id,query.from_user.id,chapter_id,db,audio_locked=True)
         return
-    await db.record_read(query.from_user.id,chapter['series_id'],chapter['chapter_num'],completed=False)
     result = audio_jobs.start(bot,db,query.from_user.id,query.message.chat.id,chapter_id,lease=cashier_lease)
     await query.message.answer({'started':'🎧 Озвучиваю главу. Аудиокнига скоро появится здесь; пока можно продолжить чтение.',
         'duplicate':'⏳ Ваша аудиоглава уже готовится. Дождитесь её отправки.',
@@ -283,15 +295,9 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         await notify_admins(bot, f"👤 Новый читатель в NovelPulse! ID: {message.from_user.id} ({name}), "
             f"вход: {(command.args or '/start')[:128]}. Всего читателей: {total}",
             settings=settings, db=db, event_key=f'new_reader:{message.from_user.id}')
+    await db.record_funnel_event(message.from_user.id,'bot_start',source=acquisition_source(command.args))
     if inviter:
-        await notify_levelups(bot,db,inviter)
-        try:
-            await bot.send_message(inviter, "⚔️ Напарник вступил в Совместный Рейд! Вам начислены +1 🔑 бесплатный ключ и +50 XP. Друг получил +1 🔑 и +25 XP!")
-        except TelegramAPIError:
-            logging.getLogger(__name__).warning("Не удалось уведомить пригласившего; ключ сохранён")
-        await message.answer('⚔️ Вы вступили в Совместный Рейд! Вам начислены +1 🔑 бесплатный ключ к любой платной главе и +25 XP! '
-            'Ваш напарник получил +1 🔑 и +50 XP.')
-        await notify_levelups(bot,db,message.from_user.id)
+        await message.answer('⚔️ Приглашение в Рейд принято! Откройте первую главу — тогда вы и ваш напарник получите по +1 🔑. Напарнику +50 XP, вам +25 XP.')
     if command.args and re.fullmatch(r"ch_[1-9][0-9]{0,17}", command.args):
         await show_chapter(bot, message.chat.id, message.from_user.id, int(command.args[3:]), db)
     elif command.args and re.fullmatch(r"series_[1-9][0-9]{0,17}", command.args):
@@ -300,20 +306,15 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         await quiz_command(message,bot,db)
     else:
         resume=await db.resume_info(message.from_user.id)
-        rows=[]
-        welcome=WELCOME
-        if resume:
-            rows.append([button(f"▶️ Продолжить чтение: «{resume['series_title'][:52]}» (Гл. {resume['chapter_num']})",f"read:{resume['id']}")])
-            welcome+='\n\n'+progress_bar(resume['read_count'],resume['total_chapters'])
-        await message.answer(welcome, reply_markup=keyboard(rows+[
-            [button("📖 Каталог новелл", "catalog")], [button("👑 Купить VIP-доступ", "vip")],
-            [button('🔖 Моя полка','library')],
-            [button(RAID_LABEL, "referral")],
-            [button("🎁 Дар Системы (Стрик)", "daily_gift")],
-            [button('👤 Мой Ранг в Системе','profile')],
-            [button('🏆 Зал Славы','leaderboard')],
-            [button('🔮 Узнать свой класс (Тест)','quiz')],
-        ] + subscription_reward_rows(await db.get_user(message.from_user.id))))
+        series=await db.list_series()
+        read_target=f"read:{resume['id']}" if resume else (f"series:{series[0]['id']}" if series else 'catalog')
+        welcome=WELCOME + ('\n\n'+progress_bar(resume['read_count'],resume['total_chapters']) if resume else '')
+        await message.answer(welcome, reply_markup=keyboard([
+            [button('▶️ Читать / Продолжить',read_target)],
+            [button(f'📚 Каталог ({len(series)} книг)','catalog')],
+            [button('🎧 Аудиокниги','genre:audio')],
+            [button('👤 Профиль и Бонусы','profile')],
+        ]))
 
 
 async def display_quiz(message: Message, bot: Bot, db: Database, user: dict, *, edit=False) -> None:
@@ -532,9 +533,7 @@ async def profile(message: Message, bot: Bot, db: Database) -> None:
     await db.ensure_user(message.from_user.id,message.from_user.username)
     await notify_levelups(bot,db,message.from_user.id)
     user=await db.get_user(message.from_user.id)
-    await message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
-        subscription_reward_rows(user) + [[button('📸 Выложить карточку в Stories (+2 ключа!)','share_story_card')]
-        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('🏆 Зал Славы','leaderboard')], [button('📖 Каталог новелл','catalog')]]))
+    await message.answer(status_window(user),parse_mode=None,reply_markup=profile_markup(user))
 
 
 async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -543,9 +542,7 @@ async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None
     await db.ensure_user(query.from_user.id,query.from_user.username)
     await notify_levelups(bot,db,query.from_user.id)
     user=await db.get_user(query.from_user.id)
-    await query.message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
-        subscription_reward_rows(user) + [[button('📸 Выложить карточку в Stories (+2 ключа!)','share_story_card')]
-        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('🏆 Зал Славы','leaderboard')], [button('📖 Каталог новелл','catalog')]]))
+    await query.message.answer(status_window(user),parse_mode=None,reply_markup=profile_markup(user))
 
 
 async def share_story_card(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -565,7 +562,7 @@ async def share_story_card(query: CallbackQuery, bot: Bot, db: Database) -> None
         })
         markup = keyboard([
             [InlineKeyboardButton(text='📲 Опубликовать в Stories', url=share_url)],
-            [button('🎁 Забрать +2 ключа и 50 XP', 'claim_story_chest')],
+            [button('🎁 Забрать 50 XP', 'claim_story_chest')],
         ])
         await bot.send_photo(
             chat_id=query.message.chat.id,
@@ -586,7 +583,7 @@ async def claim_story_chest(query: CallbackQuery, bot: Bot, db: Database) -> Non
     await db.ensure_user(query.from_user.id, query.from_user.username)
     claimed = await db.claim_story_reward(query.from_user.id)
     if claimed:
-        text = '🎉 [СУНДУК ЗА ИСТОРИЮ ОТКРЫТ!]\nВам начислено +2 🔑 бесплатных ключа и +50 XP! Приятного чтения!'
+        text = '🎉 [СУНДУК ЗА ИСТОРИЮ ОТКРЫТ!]\nВам начислено +50 XP к Рангу Игрока! Приятного чтения!'
         await notify_levelups(bot, db, query.from_user.id)
     else:
         text = 'Вы уже получили награду за публикацию истории!'
@@ -659,7 +656,7 @@ async def referral(query: CallbackQuery, bot: Bot, db: Database) -> None:
         "Вы получите +50 XP, друг — +25 XP.\n"
         f"Ваших ключей: {account['free_unlock_credits']}\n\n"
         f"Ваша ссылка: https://t.me/{me.username}?start=raid_{query.from_user.id}\n\n"
-        "Награды начисляются один раз при первом запуске бота новым другом по вашей ссылке.",
+        "Награды начисляются один раз, когда новый друг откроет главу 1 по вашей ссылке.",
         reply_markup=keyboard([[InlineKeyboardButton(text='📤 Позвать напарника в рейд',
             url=raid_share_url(me.username,query.from_user.id))]])
     )

@@ -106,6 +106,12 @@ class AudioJobs:
                 await bot.send_audio(chat_id, FSInputFile(path), title=audio_title(chapter)[:128],
                     performer='NovelPulse', caption=(f"🎧 «{series['title'][:220]}» — Глава {chapter['chapter_num']}\n"
                     f"📖 Продолжить чтение: /start ch_{chapter_id}"), parse_mode=None, request_timeout=180)
+                Path(path).unlink(missing_ok=True)
+                path=None
+                if chat_id==tg_id:
+                    from app.referrals import announce_reading_reward
+                    inviter=await db.record_read(tg_id,chapter['series_id'],chapter['chapter_num'],completed=False)
+                    await announce_reading_reward(bot,db,tg_id,inviter)
         except asyncio.CancelledError:
             raise
         except Exception as error:

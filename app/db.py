@@ -390,6 +390,19 @@ MIGRATIONS = (
     DROP TABLE xp_events;
     ALTER TABLE xp_events_stage37 RENAME TO xp_events;
     """,
+    """
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    CREATE TABLE IF NOT EXISTS funnel_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        event_name TEXT NOT NULL CHECK(event_name IN ('bot_start','open_chapter_1','open_chapter_2','view_paywall','use_free_key','click_pay_button','invoice_sent','payment_success')),
+        series_id INTEGER NOT NULL DEFAULT 0, chapter_id INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        UNIQUE(tg_id,event_name,series_id,chapter_id,source)
+    );
+    CREATE INDEX IF NOT EXISTS funnel_event_users ON funnel_events(event_name,tg_id);
+    """,
 )
 
 
@@ -459,6 +472,11 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 26:
+                    columns={row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    if 'referral_rewarded' not in columns:
+                        await self.connection.execute('ALTER TABLE users ADD COLUMN referral_rewarded INTEGER NOT NULL DEFAULT 0 CHECK(referral_rewarded IN (0,1))')
+                        await self.connection.execute('UPDATE users SET referral_rewarded=1 WHERE referred_by IS NOT NULL')
                 if index == 23:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     if 'story_reward_claimed' not in columns:
@@ -699,8 +717,8 @@ class Database:
                     answers=user['quiz_answers']+str(choice)
                     if len(answers)==4:
                         title=calculate_class(answers)
-                        await self.connection.execute('UPDATE users SET quiz_answers=?,quiz_completed=1,quiz_class_result=?, '
-                            'free_unlock_credits=free_unlock_credits+1 WHERE tg_id=?',(answers,title,tg_id))
+                        await self.connection.execute('UPDATE users SET quiz_answers=?,quiz_completed=1,quiz_class_result=? '
+                            'WHERE tg_id=?',(answers,title,tg_id))
                         await self._award_xp(tg_id,'quiz','quiz')
                     else:
                         await self.connection.execute('UPDATE users SET quiz_answers=? WHERE tg_id=?',(answers,tg_id))
@@ -733,7 +751,7 @@ class Database:
             await self.connection.execute('BEGIN IMMEDIATE')
             try:
                 cursor = await self.connection.execute(
-                    'UPDATE users SET story_reward_claimed=1,free_unlock_credits=free_unlock_credits+2 '
+                    'UPDATE users SET story_reward_claimed=1 '
                     'WHERE tg_id=? AND story_reward_claimed=0', (tg_id,))
                 claimed = cursor.rowcount == 1
                 if claimed:
@@ -831,7 +849,7 @@ class Database:
                     payments=await self._all('SELECT id,telegram_payment_charge_id FROM purchases WHERE tg_id=? AND amount_stars>0',(tg_id,))
                     for row in payments:
                         await self._award_xp(tg_id,'purchase:'+(row['telegram_payment_charge_id'] or f"legacy:{row['id']}"),'purchase')
-                    referrals=await self._all('SELECT tg_id FROM users WHERE referred_by=?',(tg_id,))
+                    referrals=await self._all('SELECT tg_id FROM users WHERE referred_by=? AND referral_rewarded=1',(tg_id,))
                     for row in referrals:await self._award_xp(tg_id,f"referral:{row['tg_id']}",'referral')
                     if user['last_checkin_date']:
                         await self._award_xp(tg_id,'checkin:'+user['last_checkin_date'],'checkin')
@@ -866,7 +884,7 @@ class Database:
     @durable_write
     async def ensure_user(self, tg_id: int, username: str | None, referred_by: int | None = None, *,
                           registration_details: bool = False):
-        """Award a referral only on first registration; return the credited inviter."""
+        """Attribute only a genuinely new reader; reward waits for delivered chapter 1."""
         async with self._lock:
             await self.connection.execute("BEGIN IMMEDIATE")
             try:
@@ -880,17 +898,43 @@ class Database:
                     await self.connection.execute("INSERT INTO users(tg_id, username, referred_by) VALUES (?, ?, ?)",
                                                    (tg_id, username, referred_by if inviter else None))
                     await self._award_xp(tg_id,'bootstrap','bootstrap')
-                if inviter:
-                    await self.connection.execute("UPDATE users SET free_unlock_credits = free_unlock_credits + 1 WHERE tg_id = ?", (referred_by,))
-                    await self._award_xp(referred_by,f'referral:{tg_id}','referral')
-                    await self.connection.execute('UPDATE users SET free_unlock_credits=free_unlock_credits+1 WHERE tg_id=?',(tg_id,))
-                    await self._award_xp(tg_id,'raid_join','raid_join')
                 await self.connection.commit()
                 result = referred_by if inviter else None
                 return (result, existing is None) if registration_details else result
             except BaseException:
                 await self.connection.rollback()
                 raise
+
+    async def _funnel_event(self, tg_id, event_name, series_id=0, chapter_id=0, source='') -> bool:
+        from app.analytics import EVENTS
+        if event_name not in EVENTS or not isinstance(source,str) or len(source)>128:
+            raise ValueError('Invalid funnel event')
+        cursor=await self.connection.execute('INSERT INTO funnel_events(tg_id,event_name,series_id,chapter_id,source) '
+            'VALUES (?,?,?,?,?) ON CONFLICT(tg_id,event_name,series_id,chapter_id,source) DO NOTHING',
+            (tg_id,event_name,series_id,chapter_id,source))
+        return cursor.rowcount==1
+
+    @durable_write
+    async def record_funnel_event(self, tg_id, event_name, series_id=0, chapter_id=0, source='') -> bool:
+        async with self._lock:
+            return await self._funnel_event(tg_id,event_name,series_id,chapter_id,source)
+
+    async def funnel_summary(self) -> dict:
+        from app.analytics import summarize
+        async with self._lock:
+            rows=await self._all('SELECT tg_id,event_name,source,created_at FROM funnel_events ORDER BY id')
+        return summarize(rows)
+
+    async def _reward_reading_referral(self,tg_id):
+        user=await self._one('SELECT referred_by,referral_rewarded FROM users WHERE tg_id=?',(tg_id,))
+        if not user or not user['referred_by'] or user['referral_rewarded']:
+            return None
+        inviter=user['referred_by']
+        await self.connection.execute('UPDATE users SET referral_rewarded=1 WHERE tg_id=?',(tg_id,))
+        await self.connection.execute('UPDATE users SET free_unlock_credits=free_unlock_credits+1 WHERE tg_id IN (?,?)',(tg_id,inviter))
+        await self._award_xp(inviter,f'referral:{tg_id}','referral')
+        await self._award_xp(tg_id,'raid_join','raid_join')
+        return inviter
 
     async def get_leaderboard(self, limit=10, viewer_tg_id=None) -> dict:
         """Stable human standings; only masked labels leave the database boundary."""
@@ -970,7 +1014,7 @@ class Database:
         return {**chapter,**{k:progress[0][k] for k in ('read_count','total_chapters')}}
 
     @durable_write
-    async def record_read(self, tg_id: int, series_id: int, chapter_num: int, *, completed: bool = True) -> None:
+    async def record_read(self, tg_id: int, series_id: int, chapter_num: int, *, completed: bool = True) -> int | None:
         """Called only after an accessible chapter was delivered in a private chat."""
         async with self._lock:
             await self.connection.execute('BEGIN IMMEDIATE')
@@ -984,9 +1028,13 @@ class Database:
                     "chapter_num = MAX(reading_progress.chapter_num, excluded.chapter_num), "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", (tg_id, series_id, chapter_num))
                 if completed:await self._award_xp(tg_id,f"read:{chapter['id']}",'read')
+                if chapter_num in (1,2):
+                    await self._funnel_event(tg_id,f'open_chapter_{chapter_num}',series_id,chapter['id'])
+                inviter=await self._reward_reading_referral(tg_id) if chapter_num==1 else None
                 await self.connection.execute('UPDATE users SET last_read_series_id=?,last_read_chapter_id=? WHERE tg_id=?',
                     (series_id,chapter['id'],tg_id))
                 await self.connection.commit()
+                return inviter
             except BaseException:
                 await self.connection.rollback();raise
 
@@ -1070,6 +1118,7 @@ class Database:
                 await self.connection.execute("INSERT INTO purchases(tg_id,chapter_id,amount_stars,kind,item_type,created_at) "
                     "VALUES (?,?,0,'bonus','wuf',?)", (tg_id,chapter_id,timestamp))
                 await self._award_xp(tg_id, f'wuf:{chapter_id}', 'wuf')
+                await self._funnel_event(tg_id,'use_free_key',chapter['series_id'],chapter_id,'wuf')
                 await self._suppress_paywalls(tg_id, chapter_id)
                 await self.connection.commit()
                 return True
@@ -1100,6 +1149,7 @@ class Database:
                     if cursor.rowcount != 1:
                         raise ValueError("Бонусных ключей пока нет. Пригласите друга, чтобы получить ключ!")
                 await self.connection.execute("INSERT INTO purchases(tg_id, chapter_id, amount_stars, kind, item_type) VALUES (?, ?, 0, 'bonus', 'bonus')", (tg_id, chapter_id))
+                await self._funnel_event(tg_id,'use_free_key',chapter['series_id'],chapter_id,'key')
                 await self._suppress_paywalls(tg_id, chapter_id)
                 await self.connection.commit()
                 return True
@@ -1182,6 +1232,7 @@ class Database:
                     "INSERT INTO purchases(tg_id, chapter_id, amount_stars, telegram_payment_charge_id, kind, vip_days, vip_until, item_type) VALUES (?, 0, ?, ?, 'vip', ?, ?, 'vip')",
                     (tg_id, price, charge_id, days, until))
                 await self.connection.execute("UPDATE vip_orders SET state = 'paid' WHERE tg_id = ? AND payload = ?", (tg_id, payload))
+                await self._funnel_event(tg_id,'payment_success',source='vip')
                 await self._award_xp(tg_id,'purchase:'+charge_id,'purchase')
                 await self._suppress_paywalls(tg_id)
                 await self.connection.commit()
@@ -1493,6 +1544,8 @@ class Database:
                     "VALUES (?, ?, ?, ?)", (tg_id, order["chapter_id"], amount, charge_id),
                 )
                 await self.connection.execute("UPDATE payment_orders SET state = 'paid' WHERE payload = ?", (payload,))
+                paid_chapter=await self._chapter(order['chapter_id'])
+                await self._funnel_event(tg_id,'payment_success',paid_chapter['series_id'],order['chapter_id'],'chapter')
                 await self._award_xp(tg_id,'purchase:'+charge_id,'purchase')
                 await self._suppress_paywalls(tg_id, order["chapter_id"])
                 await self.connection.commit()

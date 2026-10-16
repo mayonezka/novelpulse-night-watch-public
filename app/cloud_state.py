@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 TABLES = ('users', 'payment_orders', 'vip_orders', 'purchases', 'reading_progress',
           'reader_notifications', 'paywall_views', 'admin_alerts', 'processed_updates', 'xp_events', 'rank_awards',
-          'reviews','review_drafts')
+          'reviews','review_drafts','funnel_events')
 
 
 def _fernet(key):
@@ -84,8 +84,8 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
     legacy_reviews=set()
     if isinstance(payload.get('tables'),dict):
         missing=set(TABLES)-set(payload['tables'])
-        if missing and missing <= {'xp_events','rank_awards','reviews','review_drafts'}:
-            legacy_reviews=missing & {'reviews','review_drafts'}
+        if missing and missing <= {'xp_events','rank_awards','reviews','review_drafts','funnel_events'}:
+            legacy_reviews=missing & {'reviews','review_drafts','funnel_events'}
             payload={**payload,'tables':{**payload['tables'],**{name:[] for name in missing}}}
     if (payload.get('version') != 1 or payload.get('bot_id') != bot_id or
             type(payload.get('revision')) is not int or payload['revision'] < 0 or
@@ -129,7 +129,8 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                                     'player_xp':0,'player_rank':'F','chapters_read_count':0,
                                     'channel_sub_reward_claimed':0,'quiz_completed':0,'quiz_class_result':'',
                                     'quiz_answers':'','quiz_session':'','last_read_series_id':None,'last_read_chapter_id':None,
-                                    'last_wuf_unlock_at':'','last_weekly_digest_at':'','story_reward_claimed':0}
+                                    'last_wuf_unlock_at':'','last_weekly_digest_at':'','story_reward_claimed':0,
+                                    'referral_rewarded':1 if row.get('referred_by') else 0}
                         missing_streak = set(columns) - set(row)
                         if not missing_streak <= defaults.keys():
                             raise ValueError('Invalid row schema: users')
@@ -157,6 +158,8 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                         raise ValueError('Purchase identity collision: refusing financial overwrite')
                     if table == 'users' and existing and existing['created_at'] != row['created_at']:
                         raise ValueError('Reader identity collision')
+                    if table == 'funnel_events' and existing and existing != row:
+                        raise ValueError('Funnel event identity collision')
                     changes = [c for c in columns if c not in pk]
                     await db.connection.execute(f"INSERT INTO {table} ({','.join(columns)}) "
                         f"VALUES ({','.join('?' for _ in columns)}) ON CONFLICT({','.join(pk)}) DO UPDATE SET " +

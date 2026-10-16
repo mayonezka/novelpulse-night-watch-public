@@ -55,6 +55,7 @@ STAGES = (
     '36. Реальные оценки и отзывы, +15 XP однократно за книгу, разрешение на публикацию отзыва, зашифрованные черновики и облачная синхронизация.',
     '37. 24 жанровых SEO-маршрута, 120 HTML-страниц, RSS с постоянными аудиопревью, двусторонний Рейд, горизонтальный аудиоформат и поисковое описание канала.',
     '38. Зал Славы с приватными именами и отдельными учебными NPC, поиск по сюжетам и заголовкам в боте и на сайте, мост Telegraph → библиотека/жанры/RSS.',
+    '39. Воронка наблюдаемых событий, четыре входа /start, XP-only quiz/Stories и Рейд после доставки главы 1; быстрые и полные тесты.',
 )
 
 
@@ -86,7 +87,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification','stage37_verification','stage38_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification','stage37_verification','stage38_verification','stage39_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -109,6 +110,8 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
     mp3 = sum(1 for _ in data_root.rglob('*.mp3'))
     png = sum(1 for p in data_root.rglob('*') if p.suffix.lower() == '.png')
     images = sum(1 for p in data_root.rglob('*') if p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'))
+    from app.analytics import funnel_text
+    funnel = funnel_text(await db.funnel_summary())
     text = '\n'.join([
         ROLE, '', MODEL_TRAFFIC_LIGHT, '', f'Срез UTC: {datetime.now(timezone.utc).isoformat()}',
         'Это передача контекста, а не новая авторизация на публикации. Сначала читай актуальные файлы и журнал.', '',
@@ -122,6 +125,8 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         f"Последний сохранённый статус кассы: {cloud.get('active_node','нет данных')}; "
         f"cloud={cloud.get('cloud_runner',{}).get('mode','не подтверждён')}; heartbeat UTC={cloud.get('heartbeat_at','нет')}.",
         'Сохранённый статус не заменяет live-проверку GitHub/Watchdog.', '',
+        funnel, '',
+        'Текущая экономика Stage 39: quiz и Stories — только +50 XP; Рейд — ключи обоим после доставки главы 1. Старые ключи сохранены. /start — четыре входа; бонусы в профиле.', '',
         'СТРОГИЕ ИНВАРИАНТЫ',
         '1. После каждой задачи 0 MP4, 0 MP3, 0 PNG и 0 временных изображений в data/. '
         'Story-карточки создаются вне репозитория, доставляются и удаляются в finally.',
@@ -157,6 +162,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 35: ' + state.get('stage35_verification','ещё не зафиксированы; см. data/stage35_live_report.json.'), '',
         'Проверки Stage 36: ' + state.get('stage36_verification','ещё не зафиксированы; см. data/stage36_live_report.json.'), '',
         'Проверки Stage 37: ' + state.get('stage37_verification','ещё не зафиксированы; см. data/stage37_live_report.json.'), '',
+        'Проверки Stage 39: ' + state.get('stage39_verification','ещё не зафиксированы; см. data/stage39_live_report.json.'), '',
         'Проверки Stage 38: ' + state.get('stage38_verification','ещё не зафиксированы; см. data/stage38_live_report.json.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)

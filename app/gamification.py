@@ -3,7 +3,7 @@ import asyncio
 import logging
 
 XP_EVENTS = {'read': 10, 'checkin': 25, 'referral': 50, 'purchase': 100, 'bootstrap': 0,
-             'subscription': 25, 'quiz':25, 'wuf':15, 'story':50, 'review':15, 'raid_join':25}
+             'subscription': 25, 'quiz':50, 'wuf':15, 'story':50, 'review':15, 'raid_join':25}
 RANKS = (
     ('F', 0, 'Новичок без класса', 0), ('E', 50, 'Кандидат Системы', 0),
     ('D', 150, 'Пробуждённый', 1), ('C', 350, 'Боец Разлома', 1),

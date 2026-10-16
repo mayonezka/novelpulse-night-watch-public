@@ -30,6 +30,7 @@ async def buy(query: CallbackQuery, bot: Bot, db: Database) -> None:
     if await db.can_read(query.from_user.id, chapter):
         await show_chapter(bot, query.message.chat.id, query.from_user.id, chapter_id, db)
         return
+    await db.record_funnel_event(query.from_user.id,'click_pay_button',chapter['series_id'],chapter_id,'chapter')
     try:
         order = await db.create_order(query.from_user.id, chapter_id)
     except ValueError as error:
@@ -44,6 +45,7 @@ async def buy(query: CallbackQuery, bot: Bot, db: Database) -> None:
         prices=[LabeledPrice(label="Доступ к главе", amount=order["amount_stars"])],
         start_parameter=f"ch_{chapter_id}",
     )
+    await db.record_funnel_event(query.from_user.id,'invoice_sent',chapter['series_id'],chapter_id,'chapter')
 
 
 async def buy_vip(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -53,6 +55,7 @@ async def buy_vip(query: CallbackQuery, bot: Bot, db: Database) -> None:
     await db.ensure_user(query.from_user.id, query.from_user.username)
     try:
         days, price = parse_vip_payload(query.data)
+        await db.record_funnel_event(query.from_user.id,'click_pay_button',source='vip')
         await db.prepare_vip_order(query.from_user.id, query.data)
     except ValueError as error:
         await query.message.answer(str(error))
@@ -63,6 +66,7 @@ async def buy_vip(query: CallbackQuery, bot: Bot, db: Database) -> None:
         payload=query.data, provider_token="", currency="XTR",
         prices=[LabeledPrice(label=f"VIP на {vip_duration(days)}", amount=price)], start_parameter="vip",
     )
+    await db.record_funnel_event(query.from_user.id,'invoice_sent',source='vip')
 
 
 async def pre_checkout(query: PreCheckoutQuery, db: Database) -> None:

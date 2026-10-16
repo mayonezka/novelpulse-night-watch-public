@@ -355,7 +355,13 @@ async def public_growth_links(db: Database, bot: Bot, settings: Settings) -> tup
     return portal, channel
 
 
+async def funnel(message: Message, db: Database) -> None:
+    from app.analytics import funnel_text
+    await message.answer(funnel_text(await db.funnel_summary()),parse_mode=None)
+
+
 async def dashboard(message: Message, bot: Bot, db: Database, settings: Settings) -> None:
+    from app.analytics import funnel_text
     summary = await db.dashboard_stats()
     portal, channel = await public_growth_links(db, bot, settings)
     lines = ["📊 NovelPulse · Панель управления", "",
@@ -384,6 +390,7 @@ async def dashboard(message: Message, bot: Bot, db: Database, settings: Settings
                       f"Ошибок: {len(report['errors'])} · Канал: {report['channel']}"])
     lines.append(f"Фоновый интервал: {settings.autopilot_interval_hours:g} ч (0 = ручной запуск)")
     lines.append(disk_status_text())
+    lines.extend(['',funnel_text(await db.funnel_summary(),compact=True),'Подробно: /funnel'])
     if summary['channel_posts']:
         states = {"pending": "ожидает сверки", "sent": "опубликовано", "failed": "ошибка", "uncertain": "требует сверки"}
         lines.append("Публикации: " + ", ".join(f"{states[p['state']]}: {p['count']}" for p in summary['channel_posts']))
@@ -562,6 +569,8 @@ async def send_weekly_digest(message: Message, command: CommandObject, bot: Bot,
 def create_router() -> Router:
     router = Router(name="admin")
     router.message.register(brain_sync, Command('brain_sync', 'ceo_brief'), IsAdmin())
+    router.message.register(funnel, Command('funnel'), IsAdmin())
+    router.message.register(denied, Command('funnel'))
     router.message.register(denied, Command('brain_sync', 'ceo_brief'))
     router.message.register(stats, Command("stats"), IsAdmin())
     router.message.register(seed_demo, Command("seed_demo"), IsAdmin())
