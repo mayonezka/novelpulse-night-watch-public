@@ -37,22 +37,28 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
         if not series or not series.get('source_url'):
             continue
         try:
-            target_total = 10 if series_id in (3, 4, 5, 6) else 8
+            # RoyalRoad catalog IDs 7 and 8 were initially seeded with six chapters;
+            # Stage 33 extends them through chapter 10 just like the earlier hits.
+            target_total = 10 if series_id in (3, 4, 5, 6, 7, 8) else 8
             before_list = await db.list_chapters(series_id)
-            if len(before_list) >= target_total:
+            before_nums = {row['chapter_num'] for row in before_list}
+            if set(range(1, target_total + 1)).issubset(before_nums):
                 before = [await db.get_chapter(row['id']) for row in before_list]
                 valid_existing = [row for row in before if row['is_published'] and row['chapter_num'] > 2
                                   and row['price_stars'] == 10 and _has_cyrillic(row['title'] + '\n' + row['content_text'])]
                 deepened = valid_existing[-chapters_each:]
                 results.append({'series_id': series_id, 'id': series_id, 'title': series['title'],
                     'chapter_nums': sorted(row['chapter_num'] for row in deepened), 'imported': 0,
-                    'max_chapter': max(row['chapter_num'] for row in before)})
+                    'max_chapter': max(row['chapter_num'] for row in before), 'providers': {},
+                    'already_complete': True})
                 continue
             before = before_list
             source_url = royalroad_fiction_url(series['source_url'])
             old_nums = {row['chapter_num'] for row in before}
+            translator = Translator(translation_settings, client)
             run = await run_pipeline(source_url, translation_settings, db=db, client=client,
-                series_id=series_id, max_chapters=chapters_each, free_chapters_limit=2)
+                series_id=series_id, max_chapters=chapters_each, free_chapters_limit=2,
+                translator=translator)
             after = [await db.get_chapter(row['id']) for row in await db.list_chapters(series_id)]
             added = [row for row in after if row['chapter_num'] not in old_nums]
             valid = [row for row in added if row['is_published'] and row['chapter_num'] > 2
@@ -61,7 +67,8 @@ async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), ch
                 raise ValueError(f'Серия {series_id}: получено {len(valid)} новых опубликованных глав с кириллицей, нужно {chapters_each}')
             results.append({'series_id': series_id, 'id': series_id, 'title': series['title'],
                 'chapter_nums': sorted(row['chapter_num'] for row in valid), 'imported': run.imported,
-                'max_chapter': max(row['chapter_num'] for row in after)})
+                'max_chapter': max(row['chapter_num'] for row in after),
+                'providers': dict(translator.provider_usage)})
         except Exception as error:
             from app.pipeline import failure_reason
             errors.append({'series_id': series_id, 'reason': failure_reason(error)})
@@ -99,10 +106,12 @@ async def import_trending_royalroad_series(db, settings, *, client=None, chapter
         async with httpx.AsyncClient(timeout=45, transport=SourceTransport()) as owned:
             return await import_trending_royalroad_series(db, settings, client=owned, chapter_count=chapter_count)
     translation_settings = settings.model_copy(update={'llm_api_key': None})
+    from app.pipeline import Translator
+    translator = Translator(translation_settings, client)
     before = {item['id'] for item in await db.list_all_series()}
     try:
         results = await fetch_trending_royalroad(1, chapter_count, settings=translation_settings,
-            db=db, client=client, allow_fallback=False)
+            db=db, client=client, allow_fallback=False, translator=translator)
     except BaseException:
         await _discard_new_series(db, before)
         raise
@@ -121,6 +130,8 @@ async def import_trending_royalroad_series(db, settings, *, client=None, chapter
             or not _has_cyrillic(row['title'] + '\n' + row['content_text'])]
         if not expected.issubset(nums) or invalid:
             raise ValueError(f'Новая серия не прошла проверку глав/RU/цены: missing={sorted(expected-nums)}, invalid={invalid}')
+        if not translator.provider_usage.get('clients5'):
+            raise ValueError('clients5 не перевёл ни одного текстового чанка; новая серия не будет опубликована')
         slug, genre_title = _genre_for_series(series['title'], series['description'])
         async with db._lock:
             await db.connection.execute('UPDATE series SET genre_slug=?, genre_title=? WHERE id=?',
@@ -132,7 +143,8 @@ async def import_trending_royalroad_series(db, settings, *, client=None, chapter
         return {'series_id': series['id'], 'title': series['title'], 'source_url': series['source_url'],
             'chapter_nums': sorted(expected), 'chapter_count': len(chapters),
             'free_chapters_limit': series['free_chapters_limit'], 'genre_slug': slug,
-            'genre_title': genre_title, 'mode': new[0].mode}
+            'genre_title': genre_title, 'mode': new[0].mode,
+            'providers': dict(translator.provider_usage)}
     except BaseException:
         await _discard_new_series(db, before)
         raise

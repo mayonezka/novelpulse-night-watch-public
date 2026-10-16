@@ -49,6 +49,7 @@ STAGES = (
     '30. Персонализированный «Дайджест недели NovelPulse», анти-флуд рассылка 0.05с, /send_weekly_digest и автопилот 7 дней.',
     '31. Углубление каталога, новый RoyalRoad Trending, chapter SEO, IndexNow и обновление навигатора.',
     '32. Карточка ранга 9:16 для Telegram Stories и одноразовый сундук: +2 ключа и +50 XP.',
+    '33. Главы 7–10 для серий 7–8, импорт девятой записи каталога, Chapter SEO, IndexNow и обновление навигатора.',
 )
 
 
@@ -80,7 +81,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()

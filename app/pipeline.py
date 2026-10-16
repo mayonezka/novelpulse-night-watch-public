@@ -367,7 +367,8 @@ async def fetch_trending_royalroad(limit_series: int = 1, limit_chapters: int = 
                                    settings: PipelineSettings | None = None, db: Database | None = None,
                                    client: httpx.AsyncClient | None = None, mock_translate: bool = False,
                                    on_error: Callable[[str, str], Awaitable[None]] | None = None,
-                                   allow_fallback: bool = True) -> list[PipelineResult]:
+                                   allow_fallback: bool = True,
+                                   translator: Translator | None = None) -> list[PipelineResult]:
     if limit_series < 1 or limit_chapters < 1:
         raise ValueError("Лимиты новелл и глав должны быть положительными")
     settings = settings or PipelineSettings()
@@ -377,14 +378,14 @@ async def fetch_trending_royalroad(limit_series: int = 1, limit_chapters: int = 
         try:
             return await fetch_trending_royalroad(limit_series, limit_chapters, settings=settings, db=owned_db,
                                                  client=client, mock_translate=mock_translate, on_error=on_error,
-                                                 allow_fallback=allow_fallback)
+                                                 allow_fallback=allow_fallback, translator=translator)
         finally:
             await owned_db.close()
     if client is None:
         async with httpx.AsyncClient(timeout=30, transport=SourceTransport()) as owned_client:
             return await fetch_trending_royalroad(limit_series, limit_chapters, settings=settings, db=db,
                                                  client=owned_client, mock_translate=mock_translate, on_error=on_error,
-                                                 allow_fallback=allow_fallback)
+                                                 allow_fallback=allow_fallback, translator=translator)
     try:
         response = await request_with_retry(client, "GET", TRENDING_URL, timeout=30, follow_redirects=True,
                                             headers=BROWSER_HEADERS)
@@ -411,7 +412,7 @@ async def fetch_trending_royalroad(limit_series: int = 1, limit_chapters: int = 
                 continue
     results = []
     failures = []
-    translator = Translator(settings, client, mock=mock_translate)
+    translator = translator or Translator(settings, client, mock=mock_translate)
     found = 0
     for anchor in anchors:
         try:
