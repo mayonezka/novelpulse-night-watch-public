@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime,timezone
 import httpx
 
@@ -26,7 +27,8 @@ class ResumeDetector:
 
 
 class PCHeartbeatThread:
-    def __init__(self,repo,headers,epoch,runtime,on_stop,*,interval=PC_HEARTBEAT_SECONDS,tick_seconds=5):
+    def __init__(self,repo,headers,epoch,runtime,on_stop,*,interval=PC_HEARTBEAT_SECONDS,tick_seconds=5,
+                 initial_sha=None,initial_value=None):
         self.repo,self.headers,self.epoch=repo,headers,epoch
         self.runtime,self.on_stop,self.interval=runtime,on_stop,interval
         self.tick_seconds=tick_seconds
@@ -34,6 +36,14 @@ class PCHeartbeatThread:
         self.suspended=threading.Event()
         self.detector=ResumeDetector()
         self.thread=None
+        self._cache_lock=threading.Lock()
+        self.last_sha=initial_sha
+        self.last_value=deepcopy(initial_value) if initial_value else None
+
+    def cache_heartbeat(self,value,sha):
+        with self._cache_lock:
+            self.last_value=deepcopy(value)
+            self.last_sha=sha
 
     def start(self):
         self.thread=threading.Thread(target=self._run,name='NovelPulse-PC-heartbeat',daemon=True)
@@ -64,6 +74,42 @@ class PCHeartbeatThread:
         if result.status_code in (409,422):
             return False  # Another CAS writer won; re-read on the next short tick.
         result.raise_for_status()
+        try:new_sha=result.json()['content']['sha']
+        except (ValueError,KeyError,TypeError):new_sha=item['sha']
+        self.cache_heartbeat(value,new_sha)
+        return True
+
+    def publish_offline_sync(self,reason,*,timeout=.8):
+        """One-request lease release using the SHA cached by the lease publisher."""
+        with self._cache_lock:
+            sha=self.last_sha
+            value=deepcopy(self.last_value)
+        if not sha or value is None or value.get('epoch')!=self.epoch or value.get('lease_owner')!='pc':
+            return False
+        value.update(status='offline',lease_owner=None,updated_at=datetime.now(timezone.utc).isoformat(),
+                     phase='stopped',reason=reason)
+        encoded=base64.b64encode(json.dumps(value,sort_keys=True).encode()).decode()
+        url='https://api.github.com/repos/'+self.repo+'/contents/state/pc_heartbeat.json'
+        with httpx.Client(timeout=timeout,follow_redirects=False) as client:
+            response=client.put(url,headers=self.headers,json={'message':'PC power event release',
+                'sha':sha,'content':encoded,'branch':'main'})
+            if response.status_code in (409,422):
+                # A concurrent writer changed this file; a fresh read is the only safe retry.
+                response=client.get(url,headers=self.headers)
+                response.raise_for_status()
+                item=response.json()
+                current=json.loads(base64.b64decode(item['content']))
+                if current.get('epoch')!=self.epoch or current.get('lease_owner')!='pc':return False
+                current.update(status='offline',lease_owner=None,updated_at=datetime.now(timezone.utc).isoformat(),
+                    phase='stopped',reason=reason)
+                response=client.put(url,headers=self.headers,json={'message':'PC power event release retry',
+                    'sha':item['sha'],'content':base64.b64encode(json.dumps(current,sort_keys=True).encode()).decode(),
+                    'branch':'main'})
+                value=current
+            response.raise_for_status()
+            try:new_sha=response.json()['content']['sha']
+            except (ValueError,KeyError,TypeError):new_sha=sha
+        self.cache_heartbeat(value,new_sha)
         return True
 
     def _run(self):

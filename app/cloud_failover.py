@@ -182,6 +182,8 @@ class CloudFailover:
         self.public_runner = False
         self.stop_reason = None
         self.heartbeat_thread = None
+        self.heartbeat_sha = None
+        self.heartbeat_value = None
         self.power_hook = None
         self.poll_detector = ResumeDetector()
 
@@ -227,8 +229,10 @@ class CloudFailover:
                 value.update(status='online',updated_at=utc_now().isoformat(),host='pc',
                     lease_owner='pc',epoch=self.session,phase='taking_over',previous_cloud_epoch=previous)
             try:
-                await self.github.write(HEARTBEAT,value,sha)
+                written_sha=await self.github.write(HEARTBEAT,value,sha)
                 self.owned = True
+                if self.role=='pc':
+                    self.heartbeat_sha,self.heartbeat_value=written_sha,value
                 return True
             except CASConflict:
                 if attempt == 4:
@@ -321,7 +325,8 @@ class CloudFailover:
             from app.startup import pc_runtime
             loop=asyncio.get_running_loop()
             self.heartbeat_thread=PCHeartbeatThread(self.settings.cloud_repo,self.github.headers,self.session,
-                pc_runtime(),lambda reason:loop.call_soon_threadsafe(self.request_stop,reason))
+                pc_runtime(),lambda reason:loop.call_soon_threadsafe(self.request_stop,reason),
+                initial_sha=self.heartbeat_sha,initial_value=self.heartbeat_value)
             self.heartbeat_thread.start()
             from app.win_power_hook import WinPowerHook
             self.power_hook=WinPowerHook(lambda reason:self.emergency_release_sync(loop,reason))
@@ -394,7 +399,10 @@ class CloudFailover:
             else:
                 value['cloud_lease_until']=(utc_now()+timedelta(seconds=PC_LEASE_SECONDS)).isoformat()
             try:
-                await self.github.write(HEARTBEAT,value,sha)
+                written_sha=await self.github.write(HEARTBEAT,value,sha)
+                if self.role=='pc':
+                    self.heartbeat_sha,self.heartbeat_value=written_sha,value
+                    if self.heartbeat_thread:self.heartbeat_thread.cache_heartbeat(value,written_sha)
                 return
             except CASConflict:
                 if attempt==4: raise
@@ -468,23 +476,27 @@ class CloudFailover:
             self.heartbeat_thread.closed.set()
         if self.role!='pc' or not self.owned:
             return False
+        if self.heartbeat_thread:
+            self.heartbeat_thread.closed.set()
         try:
-            await asyncio.wait_for(self.flush(state='stopped',force=True,update_status=False),timeout=.95)
+            payload=await asyncio.wait_for(dump_cashier(self.db,self.bot_id),timeout=.12)
+            dirty=self.last_revision is None or payload['revision']!=self.last_revision
+            if dirty:
+                await asyncio.wait_for(self.flush(state='stopped',force=True,update_status=False),timeout=.72)
         except Exception as error:
             logger.warning('Power-event cashier flush did not finish: %s',type(error).__name__)
         try:
-            value,sha=await asyncio.wait_for(self.github.read(HEARTBEAT),timeout=.25)
-            if value.get('epoch')!=self.session:
-                return False
-            value.update(status='offline',lease_owner=None,updated_at=utc_now().isoformat(),
-                         phase='stopped',reason=reason)
-            await asyncio.wait_for(self.github.write(HEARTBEAT,value,sha),timeout=.4)
+            released=False
+            if self.heartbeat_thread:
+                released=await asyncio.wait_for(asyncio.to_thread(
+                    self.heartbeat_thread.publish_offline_sync,reason,timeout=.65),timeout=.8)
+            if not released:
+                value,sha=await asyncio.wait_for(self.github.read(HEARTBEAT),timeout=.35)
+                if value.get('epoch')!=self.session:return False
+                value.update(status='offline',lease_owner=None,updated_at=utc_now().isoformat(),
+                             phase='stopped',reason=reason)
+                await asyncio.wait_for(self.github.write(HEARTBEAT,value,sha),timeout=.5)
             self.owned=False
-            try:
-                await asyncio.wait_for(self.github.request('POST','actions/workflows/night_watch.yml/dispatches',
-                    json={'ref':'main'}),timeout=.15)
-            except Exception:
-                pass
             return True
         except Exception as error:
             logger.warning('Power-event lease publish failed: %s',type(error).__name__)
