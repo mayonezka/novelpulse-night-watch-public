@@ -380,6 +380,16 @@ MIGRATIONS = (
     DROP TABLE xp_events;
     ALTER TABLE xp_events_stage36 RENAME TO xp_events;
     """,
+    """
+    CREATE TABLE xp_events_stage37 (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap','subscription','quiz','wuf','story','review','raid_join')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    INSERT INTO xp_events_stage37 SELECT tg_id,event_key,kind,amount FROM xp_events;
+    DROP TABLE xp_events;
+    ALTER TABLE xp_events_stage37 RENAME TO xp_events;
+    """,
 )
 
 
@@ -873,6 +883,8 @@ class Database:
                 if inviter:
                     await self.connection.execute("UPDATE users SET free_unlock_credits = free_unlock_credits + 1 WHERE tg_id = ?", (referred_by,))
                     await self._award_xp(referred_by,f'referral:{tg_id}','referral')
+                    await self.connection.execute('UPDATE users SET free_unlock_credits=free_unlock_credits+1 WHERE tg_id=?',(tg_id,))
+                    await self._award_xp(tg_id,'raid_join','raid_join')
                 await self.connection.commit()
                 result = referred_by if inviter else None
                 return (result, existing is None) if registration_details else result

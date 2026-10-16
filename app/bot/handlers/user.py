@@ -19,6 +19,7 @@ from app.gamification import notify_levelups, status_window
 from app.notifications import notify_admins
 from app.quiz import question_card,result_card,recommended_series,referral_text
 from app.reviews import rating_line,review_button,register_handlers as register_reviews
+from app.referrals import RAID_LABEL,raid_share_url
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
 PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
@@ -210,7 +211,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         if credits > 0:
             rows.append([button(f"🔑 Открыть за бонусный ключ (осталось: {credits})", f"credit:{chapter_id}")])
         rows.extend([[button(label,data)] for label,data in vip_options(account)])
-        rows.extend([[button("🎁 Открыть бесплатно за друга", "referral")],
+        rows.extend([[button(RAID_LABEL, "referral")],
                      [button("👑 Купить VIP-доступ", "vip")], [button("🔙 Назад к каталогу", "catalog")]])
         if deep_peek:
             heading = f"{chapter['series_title'][:350]}\nГлава {chapter['chapter_num']}: {chapter['title'][:250]}\n\n"
@@ -272,7 +273,7 @@ async def peek(query: CallbackQuery, bot: Bot, db: Database) -> None:
 async def start(message: Message, command: CommandObject, bot: Bot, db: Database, settings: Settings) -> None:
     if not message.from_user:
         return
-    referred_by = int(command.args[4:]) if command.args and re.fullmatch(r"ref_[1-9][0-9]{0,17}", command.args) else None
+    referred_by = int(command.args.split('_')[1]) if command.args and re.fullmatch(r"(?:ref|raid)_[1-9][0-9]{0,17}", command.args) else None
     inviter, created = await db.ensure_user(message.from_user.id, message.from_user.username, referred_by, registration_details=True)
     if created and message.from_user.id not in settings.admin_ids:
         total = (await db.stats())['total_users']
@@ -283,9 +284,12 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
     if inviter:
         await notify_levelups(bot,db,inviter)
         try:
-            await bot.send_message(inviter, "🎉 По вашей ссылке пришёл новый читатель! Вам начислен +1 бесплатный ключ к любой платной главе.")
+            await bot.send_message(inviter, "⚔️ Напарник вступил в Совместный Рейд! Вам начислены +1 🔑 бесплатный ключ и +50 XP. Друг получил +1 🔑 и +25 XP!")
         except TelegramAPIError:
             logging.getLogger(__name__).warning("Не удалось уведомить пригласившего; ключ сохранён")
+        await message.answer('⚔️ Вы вступили в Совместный Рейд! Вам начислены +1 🔑 бесплатный ключ к любой платной главе и +25 XP! '
+            'Ваш напарник получил +1 🔑 и +50 XP.')
+        await notify_levelups(bot,db,message.from_user.id)
     if command.args and re.fullmatch(r"ch_[1-9][0-9]{0,17}", command.args):
         await show_chapter(bot, message.chat.id, message.from_user.id, int(command.args[3:]), db)
     elif command.args and re.fullmatch(r"series_[1-9][0-9]{0,17}", command.args):
@@ -302,7 +306,7 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         await message.answer(welcome, reply_markup=keyboard(rows+[
             [button("📖 Каталог новелл", "catalog")], [button("👑 Купить VIP-доступ", "vip")],
             [button('🔖 Моя полка','library')],
-            [button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
+            [button(RAID_LABEL, "referral")],
             [button("🎁 Дар Системы (Стрик)", "daily_gift")],
             [button('👤 Мой Ранг в Системе','profile')],
             [button('🔮 Узнать свой класс (Тест)','quiz')],
@@ -588,10 +592,13 @@ async def referral(query: CallbackQuery, bot: Bot, db: Database) -> None:
     account = await db.get_user(query.from_user.id)
     me = await bot.get_me()
     await query.message.answer(
-        "🎁 Пригласите нового читателя и получите ключ к любой платной главе!\n"
+        "⚔️ Совместный Рейд: вам и новому другу — по +1 🔑 бесплатному ключу!\n"
+        "Вы получите +50 XP, друг — +25 XP.\n"
         f"Ваших ключей: {account['free_unlock_credits']}\n\n"
-        f"Ваша ссылка: https://t.me/{me.username}?start=ref_{query.from_user.id}\n\n"
-        "Ключ начисляется один раз за нового читателя, который впервые запускает бота по вашей ссылке."
+        f"Ваша ссылка: https://t.me/{me.username}?start=raid_{query.from_user.id}\n\n"
+        "Награды начисляются один раз при первом запуске бота новым другом по вашей ссылке.",
+        reply_markup=keyboard([[InlineKeyboardButton(text='📤 Позвать напарника в рейд',
+            url=raid_share_url(me.username,query.from_user.id))]])
     )
 
 

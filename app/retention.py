@@ -8,6 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.db import Database
 from app.errors import failure_reason
+from app.referrals import RAID_LABEL
 
 
 async def send_paywall_followups(db: Database, bot: Bot, *, min_age_seconds: float = 0) -> dict:
@@ -30,7 +31,7 @@ async def send_paywall_followups(db: Database, bot: Bot, *, min_age_seconds: flo
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=price_label, callback_data=f"buy:{chapter['id']}")],
                 [InlineKeyboardButton(text="👑 Взять VIP на все книги (49 ⭐️)", callback_data="vip:7:49")],
-                [InlineKeyboardButton(text="🎁 Открыть бесплатно за друга", callback_data="referral")]])
+                [InlineKeyboardButton(text=RAID_LABEL, callback_data="referral")]])
             text = (f"📚 Вы остановились на самом интересном месте в «{chapter['series_title'][:180]}»!\n\n"
                     f"Ещё один фрагмент главы {chapter['chapter_num']}:\n\n{chapter['content_text'][300:550]}\n\n"
                     "Что скрывается дальше? Вернитесь к истории — продолжение уже ждёт.\n"

@@ -13,9 +13,12 @@ from app.config import PipelineSettings, Settings
 from app.db import Database
 from app.web_portal import generate_web_portal
 from app.crawler_indexing import indexnow_key, write_indexnow_key, submit_portal_indexnow
+from app.seo_hubs import SEO_FILENAMES
+from app.podcast_feed import catalog_podcast_assets,valid_preview_bytes
 
 
 def matches_public_text(remote: bytes, local: Path) -> bool:
+    if local.suffix.lower()=='.mp3':return remote==local.read_bytes()
     # Contents API publishes LF text; Windows exports may use CRLF on disk.
     return remote.decode('utf-8').replace('\r\n', '\n') == local.read_text(encoding='utf-8')
 
@@ -24,12 +27,22 @@ def message_contains_url(message, url: str) -> bool:
     return url in (message.text or '') or any(getattr(entity, 'url', None) == url for entity in (message.entities or []))
 
 
-def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = (), chapter_pages=(), verification_key='') -> dict[str, str]:
+def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = (), chapter_pages=(), verification_key='',
+                        seo_pages=(),podcast_feed=False,podcast_audio=None) -> dict[str, str | bytes]:
     root = directory.resolve()
+    if any(name not in SEO_FILENAMES for name in seo_pages):raise ValueError('Invalid SEO filename')
+    podcast_audio=podcast_audio or {}
+    for name,data in podcast_audio.items():
+        match=re.fullmatch(r'podcast_([1-9][0-9]*)\.mp3',name)
+        if not match or int(match[1]) not in series_ids or not valid_preview_bytes(data):
+            raise ValueError('Invalid public podcast preview')
     for name in chapter_pages:
         match=re.fullmatch(r'series_([1-9][0-9]*)_ch_([1-9][0-9]*)\.html',name)
         if not match or int(match[1]) not in series_ids:raise ValueError('Invalid public chapter filename')
     names = ['index.html', *[f'series_{i}.html' for i in series_ids], *chapter_pages, 'sitemap.xml', 'robots.txt']
+    names.extend(seo_pages)
+    if podcast_feed:names.append('podcast.xml')
+    names.extend(podcast_audio)
     if verification_key:
         if not re.fullmatch('[0-9a-f]{32}', verification_key):
             raise ValueError('Invalid IndexNow key')
@@ -39,12 +52,20 @@ def public_static_files(directory: Path, series_ids: list[int], *, secrets: list
         path = root / name
         if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file():
             raise ValueError('Public deployment requires regular files within docs/')
-        content = path.read_text(encoding='utf-8')
+        if name in podcast_audio:
+            content=path.read_bytes()
+            if content!=podcast_audio[name]:raise ValueError('Podcast bytes differ from the authorized catalog preview')
+            if any(secret and any(secret.encode(codec) in content for codec in ('utf-8','utf-16-le','utf-16-be')) for secret in secrets):
+                raise ValueError('Secret-like content detected in public podcast export')
+            scanned=content.decode('latin-1')
+        else:
+            content = path.read_text(encoding='utf-8')
+            scanned=content
         if name == verification_key + '.txt' and content != verification_key:
             raise ValueError('IndexNow verification file content mismatch')
-        if (any(secret and secret in content for secret in secrets)
-                or re.search(r'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|[0-9]{8,12}:[A-Za-z0-9_-]{30,})', content)
-                or '-----BEGIN PRIVATE KEY-----' in content):
+        if (any(secret and secret in scanned for secret in secrets)
+                or re.search(r'(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|[0-9]{8,12}:[A-Za-z0-9_-]{30,})', scanned)
+                or '-----BEGIN PRIVATE KEY-----' in scanned):
             raise ValueError('Secret-like content detected in public static export')
         files[name] = content
     return files
@@ -68,10 +89,15 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
                 directory=directory, indexing_client=indexing_client, indexnow_wait_seconds=indexnow_wait_seconds)
     ids = [s['id'] for s in await db.list_series()]
     chapter_pages=[f"series_{sid}_ch_{c['chapter_num']}.html" for sid in ids for c in await db.list_chapters(sid)]
-    allowed_names={'index.html','sitemap.xml','robots.txt',*[f'series_{sid}.html' for sid in ids],*chapter_pages}
+    podcast_audio=await catalog_podcast_assets(db)
+    allowed_names={'index.html','sitemap.xml','robots.txt','podcast.xml',*SEO_FILENAMES,*podcast_audio,
+        *[f'series_{sid}.html' for sid in ids],*chapter_pages}
     secret_values = [token, settings.bot_token.get_secret_value(), await db.get_state('telegraph_access_token') or '']
     if settings.llm_api_key:
         secret_values.append(settings.llm_api_key.get_secret_value())
+    for field in ('cloud_state_key','cloud_github_token'):
+        secret=getattr(settings,field,None)
+        if secret:secret_values.append(secret.get_secret_value())
     ignore = Path('.gitignore').read_text(encoding='utf-8')
     if '.env' not in ignore.splitlines() or '*.db' not in ignore.splitlines():
         raise ValueError('.gitignore must exclude .env and *.db before public deployment')
@@ -108,19 +134,28 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     await generate_web_portal(db, username, output_dir=directory, base_url=base_url, channel_id=channel)
     write_indexnow_key(directory, base_url)
     files = public_static_files(Path(directory), ids, secrets=secret_values,chapter_pages=chapter_pages,
-                               verification_key=verification_key)
+                               verification_key=verification_key,seo_pages=SEO_FILENAMES,
+                               podcast_feed=True,podcast_audio=podcast_audio)
     branch = repo['default_branch']
+    if state.get('status')=='created':
+        # An empty Git repository has no ref/tree for a bulk Git Data commit yet.
+        initial=await client.get(f'https://api.github.com/repos/{full_name}/contents/index.html',params={'ref':branch})
+        if initial.status_code==404:
+            await github_request(client,'PUT',f'/repos/{full_name}/contents/index.html',expected=(200,201),
+                json={'message':'Initialize verified public library','content':base64.b64encode(files['index.html'].encode()).decode(),'branch':branch})
+        elif initial.status_code!=200:raise ValueError('Cannot initialize the public Pages branch')
     if len(files)>20:
         await publish_static_commit(client,full_name,branch,files)
     for name, content in files.items():
         if len(files)>20:break
         current = await client.get(f'https://api.github.com/repos/{full_name}/contents/{name}', params={'ref': branch})
-        payload = {'message': f'Publish public library: {name}', 'content': base64.b64encode(content.encode()).decode(), 'branch': branch}
+        data=content if isinstance(content,bytes) else content.encode()
+        payload = {'message': f'Publish public library: {name}', 'content': base64.b64encode(data).decode(), 'branch': branch}
         if current.status_code == 200:
             existing = current.json()
             if existing.get('type') != 'file':
                 raise ValueError('Unexpected remote content type')
-            if base64.b64decode(existing.get('content', '')).decode() == content:
+            if base64.b64decode(existing.get('content', '')) == data:
                 continue
             payload['sha'] = existing['sha']
         elif current.status_code != 404:
@@ -137,7 +172,8 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     if tree.get('truncated') or remote_files != sorted(files):
         raise ValueError('Public repository file audit failed')
     state.update(base_url=base_url, branch=branch, status='building', files=remote_files,
-                 digest=hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest())
+                 digest=hashlib.sha256(json.dumps({n:hashlib.sha256(c if isinstance(c,bytes) else c.encode()).hexdigest()
+                     for n,c in files.items()},sort_keys=True).encode()).hexdigest())
     await db.set_state('public_web_deployment', json.dumps(state))
     # This public, unauthenticated client is separate from the GitHub credentialed transport.
     try:
@@ -158,7 +194,7 @@ async def publish_static_commit(client, full_name, branch, files):
     old={r['path']:r['sha'] for r in tree['tree'] if r['type']=='blob'}
     changes=[]
     for name,content in files.items():
-        data=content.encode('utf-8')
+        data=content if isinstance(content,bytes) else content.encode('utf-8')
         digest=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
         if old.get(name)==digest:continue
         blob=await github_request(client,'POST',base+'/git/blobs',expected=(201,),json={

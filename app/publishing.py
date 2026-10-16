@@ -22,6 +22,59 @@ STORY_OPTIONS=(
     '📖 Сразу открыть следующую главу в @NovelPulseBot',
 )
 
+CHANNEL_SEARCH_DESCRIPTION=('📚 ЛитРПГ, Аудиокниги, Ранобэ и Веб-Новеллы на русском! '
+    'Прокачка, Система, Исэкай, Попаданцы. 🎧 Слушай и читай бесплатно в боте: @NovelPulseBot')
+
+
+async def publish_raid_announcement(db,bot,channel_id,base_url):
+    """One factual channel release; permission failure cannot create duplicate posts."""
+    from app.crawler_indexing import portal_base
+    base=portal_base(base_url)
+    description={'updated':False}
+    try:
+        description['updated']=bool(await bot.set_chat_description(channel_id,CHANNEL_SEARCH_DESCRIPTION))
+    except TelegramAPIError as error:
+        description['error']=type(error).__name__
+    report=json.loads(await db.get_state('web_portal_report') or '{}')
+    count=sum(n.endswith('.html') for n in report.get('files',[]))
+    if not count:raise ValueError('Generate the public portal before announcing it')
+    username=(await bot.get_me()).username
+    key=f'stage37_raid_announcement:{channel_id}'
+    async with db._lock:
+        await db.connection.execute('BEGIN IMMEDIATE')
+        try:
+            row=await db._one('SELECT value FROM app_state WHERE key=?',(key,))
+            old=json.loads(row['value']) if row else {}
+            if old.get('state')=='sent':
+                await db.connection.commit();return {**old,'description':description}
+            if old.get('state') in ('sending','uncertain'):raise RuntimeError('Raid announcement delivery requires reconciliation')
+            await db.connection.execute('INSERT INTO app_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                (key,json.dumps({'state':'sending'})))
+            await db.connection.commit()
+        except BaseException:await db.connection.rollback();raise
+    text=('⚔️ Совместный Рейд — по +1 ключу обоим!\n\n'
+        'Позовите нового читателя в NovelPulse. Вы получите +1 🔑 и +50 XP, а друг — +1 🔑 и +25 XP. '
+        'Ключ открывает платную главу навсегда.\n\n'
+        'Как участвовать: откройте бота → «Совместный Рейд» → отправьте другу персональную ссылку. '
+        'Награды приходят при первом запуске бота новым другом, один раз за его регистрацию.\n\n'
+        f'📚 Выбирайте историю: {count} страниц библиотеки, включая 24 жанровых маршрута с текстом и аудиопревью.\n'
+        f'{base}\n\n🎧 RSS-подкаст: {report.get("podcast_episodes",0)} коротких аудиознакомств. '
+        f'Полные доступные главы слушайте в боте.\n{base}podcast.xml\n\n'
+        f'👉 Читать и слушать: @{username}')
+    try:
+        message=await bot.send_message(channel_id,text,parse_mode=None,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text='⚔️ Найти напарника и читать бесплатно',url=f'https://t.me/{username}')],
+                [InlineKeyboardButton(text='📚 Открыть библиотеку и подборки',url=base)]]))
+    except BaseException as error:
+        definite=isinstance(error,TelegramAPIError) and not isinstance(error,TelegramNetworkError)
+        await db.set_state(key,json.dumps({'state':'failed' if definite else 'uncertain','error':type(error).__name__}))
+        raise
+    receipt={'state':'sent','message_id':message.message_id,'description':description,
+        'portal_pages':count,'podcast_episodes':report.get('podcast_episodes',0)}
+    await db.set_state(key,json.dumps(receipt))
+    return receipt
+
 
 async def publish_featured_review_post(db,bot,channel_id,series_id=5):
     """Feature consented reviews; editorial examples never count as reader ratings."""
