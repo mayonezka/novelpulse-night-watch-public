@@ -1,1 +1,19 @@
-{"cloud_lease_until": "2026-10-16T14:48:36.839716+00:00", "cloud_run_id": "38918371337", "epoch": "a7457fe8c3ac4cd78bdecfd950f26f47", "heartbeat_interval_seconds": 20, "host": "pc", "lease_owner": null, "lease_ttl_seconds": 45, "pc_runtime": {"executable": "pythonw.exe", "pid": 68328, "watchdog_active": true}, "phase": "stopped", "previous_cloud_epoch": "493b093c45d04db7870ec79a0af0a2e9", "reason": "win32_power_event", "status": "offline", "updated_at": "2026-10-16T14:48:18.456275+00:00"}
+{
+  "cloud_lease_until": "2026-10-16T14:48:36.839716+00:00",
+  "cloud_run_id": "38918371337",
+  "epoch": "a7457fe8c3ac4cd78bdecfd950f26f47",
+  "heartbeat_interval_seconds": 20,
+  "host": "pc",
+  "lease_owner": null,
+  "lease_ttl_seconds": 45,
+  "pc_runtime": {
+    "executable": "pythonw.exe",
+    "pid": 68328,
+    "watchdog_active": true
+  },
+  "phase": "stopped",
+  "previous_cloud_epoch": "493b093c45d04db7870ec79a0af0a2e9",
+  "reason": "win32_power_event",
+  "status": "offline",
+  "updated_at": "2026-10-16T14:48:21.886867+00:00"
+}
