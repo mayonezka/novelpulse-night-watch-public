@@ -43,6 +43,22 @@ def with_portal_bridge(nodes: list, base_url: str = PORTAL_URL) -> list:
     return body + portal_bridge_nodes(base_url)
 
 
+def canonical_dom(value):
+    """Telegraph adds target=_blank to anchors; it is not part of the API Node schema.
+
+    Ignore only this presentational enrichment, retaining all text, links and node order
+    for strict lossless read-back validation and repeatable footer replacement.
+    """
+    if isinstance(value,list):
+        return [canonical_dom(item) for item in value]
+    if not isinstance(value,dict):
+        return value
+    result={key:canonical_dom(item) for key,item in value.items()}
+    if result.get('tag')=='a' and result.get('attrs',{}).get('target')=='_blank':
+        result['attrs']={key:item for key,item in result['attrs'].items() if key!='target'}
+    return result
+
+
 class TelegraphError(ValueError):
     pass
 
@@ -318,13 +334,13 @@ async def sync_portal_backlinks(db: Database, *, base_url: str = PORTAL_URL,
             content = json.dumps(updated, ensure_ascii=False, separators=(',', ':'))
             if len(content.encode()) > CONTENT_LIMIT:
                 raise TelegraphError('SEO-мост превышает лимит Telegraph: исходный текст сохранён')
-            changed = nodes != updated
+            changed = canonical_dom(nodes) != canonical_dom(updated)
             if changed:
                 result = await api_call(client, 'editPage', {'access_token':token,
                     'path':parsed.path.lstrip('/'),'title':page['title'],
                     'author_name':page.get('author_name','NovelPulse'),
                     'author_url':page.get('author_url',''),'content':content,'return_content':'true'})
-                if result.get('content') != updated:
+                if canonical_dom(result.get('content')) != canonical_dom(updated):
                     raise TelegraphError('Telegraph: изменённый DOM не подтверждён')
             report.append({'url':url,'updated':changed,'verified':True,
                 'content_bytes':len(content.encode()),'links':len(portal_bridge_nodes(base_url)[0]['children'])//2})
