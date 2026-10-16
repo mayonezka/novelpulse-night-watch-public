@@ -80,7 +80,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -101,6 +101,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
     data_root = Path(db.path).resolve().parent
     mp4 = sum(1 for _ in data_root.rglob('*.mp4'))
     mp3 = sum(1 for _ in data_root.rglob('*.mp3'))
+    png = sum(1 for p in data_root.rglob('*') if p.suffix.lower() == '.png')
     images = sum(1 for p in data_root.rglob('*') if p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'))
     text = '\n'.join([
         ROLE, '', MODEL_TRAFFIC_LIGHT, '', f'Срез UTC: {datetime.now(timezone.utc).isoformat()}',
@@ -111,7 +112,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         f"Shorts: pending={counts.get('pending',0)}, uploaded={counts.get('uploaded',0)}; остальные статусы: "
             + (', '.join(f'{k}={v}' for k,v in sorted(counts.items()) if k not in ('pending','uploaded')) or 'нет') + factory_note,
         f'YouTube cooldown UTC: {cooldown or "нет"}. Не загружать до истечения cooldown; максимум 4 за скользящие 24 ч.',
-        f'Файлы рядом с SQLite: MP4={mp4}, MP3={mp3}, временные изображения={images}.',
+        f'Файлы рядом с SQLite: MP4={mp4}, MP3={mp3}, PNG={png}, временные изображения={images}.',
         f"Последний сохранённый статус кассы: {cloud.get('active_node','нет данных')}; "
         f"cloud={cloud.get('cloud_runner',{}).get('mode','не подтверждён')}; heartbeat UTC={cloud.get('heartbeat_at','нет')}.",
         'Сохранённый статус не заменяет live-проверку GitHub/Watchdog.', '',
@@ -145,6 +146,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 29: ' + state.get('stage29_verification','ещё не зафиксированы; см. data/stage29_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 30: ' + state.get('stage30_verification','ещё не зафиксированы; см. data/stage30_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 31: ' + state.get('stage31_verification','ещё не зафиксированы; см. data/stage31_live_report.json и live-отчёт.'), '',
+        'Проверки Stage 32: ' + state.get('stage32_verification','ещё не зафиксированы; см. data/stage32_full_tests.log и live-отчёт.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)
     return text
