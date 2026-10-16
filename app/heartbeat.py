@@ -7,8 +7,8 @@ import time
 from datetime import datetime,timezone
 import httpx
 
-PC_HEARTBEAT_SECONDS=45
-PC_LEASE_SECONDS=120
+PC_HEARTBEAT_SECONDS=20
+PC_LEASE_SECONDS=45
 RESUME_GAP_SECONDS=90
 logger=logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class PCHeartbeatThread:
         value.update(status='online',updated_at=now.isoformat(),phase='active',pc_runtime=self.runtime,
                      heartbeat_interval_seconds=PC_HEARTBEAT_SECONDS,lease_ttl_seconds=PC_LEASE_SECONDS)
         encoded=base64.b64encode(json.dumps(value,sort_keys=True).encode()).decode()
-        result=client.put(url,headers=self.headers,json={'message':'PC 45s heartbeat','sha':item['sha'],
+        result=client.put(url,headers=self.headers,json={'message':'PC 20s heartbeat','sha':item['sha'],
                                                        'content':encoded,'branch':'main'})
         if result.status_code in (409,422):
             return False  # Another CAS writer won; re-read on the next short tick.

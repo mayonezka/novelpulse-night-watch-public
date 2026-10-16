@@ -6,7 +6,7 @@ import time
 from app.cloud_failover import GitHubState,HEARTBEAT,RUNNER,pc_online,cloud_online,utc_now,CASConflict
 
 logger=logging.getLogger(__name__)
-STANDBY_POLL_SECONDS=20
+STANDBY_POLL_SECONDS=6
 RUN_BUDGET_SECONDS=5*3600+20*60
 
 
@@ -33,7 +33,7 @@ class HotStandby:
             return
         value={'protocol':17,'mode':mode,'run_id':self.run_id,'updated_at':utc_now().isoformat(),
             'drained_epoch':self.drained_epoch,'active_epoch':epoch,
-            'poll_seconds':self.poll_seconds,'pc_lease_seconds':120}
+            'poll_seconds':self.poll_seconds,'pc_lease_seconds':45}
         # Contents API commits share a branch ref even for different files. The
         # cashier lease renewal may commit concurrently with this cosmetic marker.
         for attempt in range(5):
@@ -60,7 +60,8 @@ class HotStandby:
         try:
             while self.clock()<deadline-45:
                 try:
-                    heartbeat,_=await self.github.read(HEARTBEAT)
+                    read_heartbeat=getattr(self.github,'read_conditional',self.github.read)
+                    heartbeat,_=await read_heartbeat(HEARTBEAT)
                     if pc_online(heartbeat) or cloud_online(heartbeat):
                         await self.publish('HOT_STANDBY')
                         await self.sleep(self.poll_seconds)

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -76,6 +77,8 @@ class GitHubState:
         self.client = client or httpx.AsyncClient(timeout=25, follow_redirects=False)
         self.headers = {'Authorization':'Bearer '+token, 'Accept':'application/vnd.github+json',
                         'X-GitHub-Api-Version':'2022-11-28', 'Cache-Control':'no-cache'}
+        self._etag = {}
+        self._conditional_cache = {}
 
     async def request(self, method, path, **kwargs):
         response = await self.client.request(method, 'https://api.github.com/repos/'+self.repo+('/'+path if path else ''),
@@ -93,6 +96,33 @@ class GitHubState:
             item_blob = await self.request('GET','git/blobs/'+item['sha'])
             content = item_blob['content']
         return json.loads(base64.b64decode(content)), item['sha']
+
+    async def read_conditional(self, path):
+        """Read a small state file with ETag validation; 304 reuses the last body."""
+        url='https://api.github.com/repos/'+self.repo+'/contents/'+path
+        headers=dict(self.headers)
+        etag=self._etag.get(path)
+        if etag:
+            headers['If-None-Match']=etag
+        response=await self.client.get(url,headers=headers)
+        if response.status_code==304:
+            cached=self._conditional_cache.get(path)
+            if cached is None:
+                raise RuntimeError('GitHub returned 304 without a cached state body')
+            return cached
+        if response.status_code>=400:
+            raise RuntimeError(f'GitHub GET contents/{path}: HTTP {response.status_code}')
+        item=response.json()
+        content=item.get('content')
+        if item.get('encoding')!='base64':
+            blob=await self.request('GET','git/blobs/'+item['sha'])
+            content=blob['content']
+        result=(json.loads(base64.b64decode(content)),item['sha'])
+        response_etag=response.headers.get('ETag')
+        if response_etag:
+            self._etag[path]=response_etag
+        self._conditional_cache[path]=result
+        return result
 
     async def write(self, path, value, sha=None):
         encoded = json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2).encode()
@@ -152,6 +182,7 @@ class CloudFailover:
         self.public_runner = False
         self.stop_reason = None
         self.heartbeat_thread = None
+        self.power_hook = None
         self.poll_detector = ResumeDetector()
 
     def request_stop(self, reason):
@@ -190,7 +221,7 @@ class CloudFailover:
                 if pc_online(value) or cloud_online(value):
                     return False
                 value.update(lease_owner='cloud', epoch=self.session, cloud_run_id=self.run_id,
-                    cloud_lease_until=(utc_now()+timedelta(seconds=90)).isoformat())
+                    cloud_lease_until=(utc_now()+timedelta(seconds=PC_LEASE_SECONDS)).isoformat())
             else:
                 previous = value.get('epoch') if value.get('lease_owner') == 'cloud' else None
                 value.update(status='online',updated_at=utc_now().isoformat(),host='pc',
@@ -291,6 +322,9 @@ class CloudFailover:
             self.heartbeat_thread=PCHeartbeatThread(self.settings.cloud_repo,self.github.headers,self.session,
                 pc_runtime(),lambda reason:loop.call_soon_threadsafe(self.request_stop,reason))
             self.heartbeat_thread.start()
+            from app.win_power_hook import WinPowerHook
+            self.power_hook=WinPowerHook(lambda reason:self.emergency_release_sync(loop,reason))
+            self.power_hook.start()
         return True
 
     async def sync_catalog(self):
@@ -357,7 +391,7 @@ class CloudFailover:
                     pc_runtime=pc_runtime(),heartbeat_interval_seconds=PC_HEARTBEAT_SECONDS,
                     lease_ttl_seconds=PC_LEASE_SECONDS)
             else:
-                value['cloud_lease_until']=(utc_now()+timedelta(seconds=90)).isoformat()
+                value['cloud_lease_until']=(utc_now()+timedelta(seconds=PC_LEASE_SECONDS)).isoformat()
             try:
                 await self.github.write(HEARTBEAT,value,sha)
                 return
@@ -386,13 +420,15 @@ class CloudFailover:
                 self.request_stop('synchronization_failed')
                 return
             try:
-                await asyncio.wait_for(self.stop.wait(),timeout=20 if self.role=='cloud' else 5)
+                await asyncio.wait_for(self.stop.wait(),timeout=15 if self.role=='cloud' else 5)
             except asyncio.TimeoutError:
                 pass
 
     async def shutdown(self, *, dispatch=True):
         self.db.durability_hook=None
         self.stop.set()
+        if self.power_hook:
+            self.power_hook.close()
         if self.heartbeat_thread:
             await asyncio.to_thread(self.heartbeat_thread.stop)
         if self.background:
@@ -423,17 +459,64 @@ class CloudFailover:
             if self._atexit: atexit.unregister(self._atexit)
             await self.github.close()
 
-    def exit_fallback(self):
+    async def emergency_release(self, reason):
+        """Flush and publish an offline PC lease while Windows still permits I/O."""
+        self.request_stop(reason)
+        self.db.durability_hook=None
+        if self.heartbeat_thread:
+            self.heartbeat_thread.closed.set()
+        if self.role!='pc' or not self.owned:
+            return False
+        try:
+            await asyncio.wait_for(self.flush(state='stopped',force=True),timeout=.75)
+        except Exception as error:
+            logger.warning('Power-event cashier flush did not finish: %s',type(error).__name__)
+        try:
+            value,sha=await asyncio.wait_for(self.github.read(HEARTBEAT),timeout=.35)
+            if value.get('epoch')!=self.session:
+                return False
+            value.update(status='offline',lease_owner=None,updated_at=utc_now().isoformat(),
+                         phase='stopped',reason=reason)
+            await asyncio.wait_for(self.github.write(HEARTBEAT,value,sha),timeout=.5)
+            self.owned=False
+            try:
+                await asyncio.wait_for(self.github.request('POST','actions/workflows/night_watch.yml/dispatches',
+                    json={'ref':'main'}),timeout=.25)
+            except Exception:
+                pass
+            return True
+        except Exception as error:
+            logger.warning('Power-event lease publish failed: %s',type(error).__name__)
+            return False
+
+    def emergency_release_sync(self, loop, reason, *, timeout=1.9):
+        """Win32 callbacks are synchronous, but bounded to the OS's 2s budget."""
+        deadline=time.monotonic()+min(1.9,max(.1,timeout))
+        try:
+            loop.call_soon_threadsafe(self.request_stop,reason)
+            future=asyncio.run_coroutine_threadsafe(self.emergency_release(reason),loop)
+            future.result(timeout=max(.05,deadline-time.monotonic()))
+        except Exception as error:
+            logger.warning('Bounded power-event release used direct fallback: %s',type(error).__name__)
+            try:
+                if 'future' in locals(): future.cancel()
+                remaining=max(.05,deadline-time.monotonic())
+                self.exit_fallback(reason,timeout=min(.08,remaining/4))
+            except Exception:
+                pass
+
+    def exit_fallback(self, reason='process_exit', *, timeout=3):
         """Best effort only: power loss/TerminateProcess cannot execute atexit."""
         try:
-            with httpx.Client(timeout=3) as client:
+            with httpx.Client(timeout=timeout) as client:
                 base='https://api.github.com/repos/'+self.settings.cloud_repo+'/'
                 response=client.get(base+'contents/'+HEARTBEAT,headers=self.github.headers)
                 item=response.json()
                 value=json.loads(base64.b64decode(item['content']))
                 if value.get('epoch') != self.session:
                     return
-                value.update(status='offline',lease_owner=None,updated_at=utc_now().isoformat(),phase='stopped')
+                value.update(status='offline',lease_owner=None,updated_at=utc_now().isoformat(),
+                             phase='stopped',reason=reason)
                 response=client.put(base+'contents/'+HEARTBEAT,headers=self.github.headers,json={'message':'PC exit',
                     'sha':item['sha'],'content':base64.b64encode(json.dumps(value).encode()).decode(),'branch':'main'})
                 if response.is_success:
@@ -503,7 +586,7 @@ async def cloud_summary(db,settings):
     standby=info.get('cloud_runner',{})
     return (f"☁️ Активный узел: {info.get('active_node','передача аренды')}\n"
         f"PC Heartbeat UTC: {info.get('heartbeat_at','нет')}\n"
-        f"Heartbeat: 45 с · PC lease: 120 с · Cloud: {standby.get('mode','не подтверждён')} (опрос 20 с)\n"
+        f"Heartbeat: {PC_HEARTBEAT_SECONDS} с · PC lease: {PC_LEASE_SECONDS} с · Cloud: {standby.get('mode','не подтверждён')} (опрос 6 с, ETag)\n"
         f"GitHub: https://github.com/{settings.cloud_repo} · {info.get('sync','нет синхронизации')}\n"
         f"Ночных изменений объединено: {info.get('merged_items',0)} · revision: {info.get('revision','—')}\n"
         f"🛡 NovelPulse_Watchdog: {watchdog}\n"

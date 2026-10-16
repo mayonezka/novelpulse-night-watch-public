@@ -50,6 +50,7 @@ STAGES = (
     '31. Углубление каталога, новый RoyalRoad Trending, chapter SEO, IndexNow и обновление навигатора.',
     '32. Карточка ранга 9:16 для Telegram Stories и одноразовый сундук: +2 ключа и +50 XP.',
     '33. Главы 7–10 для серий 7–8, импорт девятой записи каталога, Chapter SEO, IndexNow и обновление навигатора.',
+    '34. Win32 shutdown/suspend handover, PC heartbeat 20 с / lease 45 с и Night-Watch ETag polling 6 с.',
 )
 
 
@@ -81,7 +82,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -123,8 +124,8 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         '2. NovelPulse_Watchdog каждые 5 минут; один polling worker pythonw.exe, detached. '
         'Тяжёлое видео — изолированный subprocess. Историческая локальная dispatcher p95 ≈43 мс; это не гарантия сетевой задержки.',
         '3. Публичный Night-Watch остаётся HOT_STANDBY, cashier и каталог зашифрованы Fernet. '
-        'Цель быстрого переключения ≈20 с; последнее контролируемое наблюдение Stage 21 — 37.5 с при graceful stop. '
-        'Heartbeat 45 с, lease TTL 120 с, опрос 20 с. Не обещай 20 с при внезапном отключении.',
+        'Win32 shutdown/logoff/suspend hook ограничивает освобождение PC lease двумя секундами; '
+        'heartbeat 20 с, TTL 45 с, cloud ETag polling 6 с. Фактический takeover указывай только по live-замеру.',
         '4. Viral Video Engine 2.0: 24 FPS, Shock-First с 0.0s без чтения заголовка, '
         'DmitryNeural + SvetlanaNeural, karaoke, Solo-Leveling HUD, Zero-402 art, MAX_YOUTUBE_UPLOADS_PER_24H=4.',
         '5. /brain_sync и /ceo_brief доступны только ADMIN_IDS. Не публиковать .env, токены, ID читателей или незашифрованную кассу.',
@@ -148,6 +149,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 30: ' + state.get('stage30_verification','ещё не зафиксированы; см. data/stage30_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 31: ' + state.get('stage31_verification','ещё не зафиксированы; см. data/stage31_live_report.json и live-отчёт.'), '',
         'Проверки Stage 32: ' + state.get('stage32_verification','ещё не зафиксированы; см. data/stage32_full_tests.log и live-отчёт.'), '',
+        'Проверки Stage 34: ' + state.get('stage34_verification','ещё не зафиксированы; см. data/stage34_full_tests.log и live-отчёт.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)
     return text
