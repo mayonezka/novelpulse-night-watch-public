@@ -598,7 +598,7 @@ def create_router() -> Router:
     router.message.register(terms, Command("terms"), private)
     router.message.register(payment_support, Command("paysupport", "support"), private)
     router.callback_query.filter(F.message.chat.type == "private")
-    router.callback_query.register(vip, F.data == "vip")
+    router.callback_query.register(vip, F.data.in_(("vip", "vip_menu")))
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(daily_gift, F.data == "daily_gift")
     router.callback_query.register(claim_sub_key, F.data == 'claim_sub_key')

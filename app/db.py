@@ -336,6 +336,9 @@ MIGRATIONS = (
     DROP TABLE xp_events;
     ALTER TABLE xp_events_stage29 RENAME TO xp_events;
     """,
+    """
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    """,
 )
 
 
@@ -405,6 +408,10 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 22:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    if 'last_weekly_digest_at' not in columns:
+                        await self.connection.execute("ALTER TABLE users ADD COLUMN last_weekly_digest_at TEXT NOT NULL DEFAULT ''")
                 if index == 21:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     if 'last_wuf_unlock_at' not in columns:
@@ -802,6 +809,35 @@ class Database:
                 "ON CONFLICT(tg_id, series_id) DO UPDATE SET "
                 "chapter_num = MAX(reader_notifications.chapter_num, excluded.chapter_num), "
                 "sent_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", (tg_id, series_id, chapter_num))
+
+    @durable_write
+    async def mark_weekly_digest_sent(self, tg_id: int, sent_at: str | None = None) -> None:
+        timestamp = sent_at or datetime.now(timezone.utc).isoformat()
+        async with self._lock:
+            await self.connection.execute(
+                "UPDATE users SET last_weekly_digest_at = ? WHERE tg_id = ?",
+                (timestamp, tg_id))
+
+    async def list_users_for_weekly_digest(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        clock = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        cutoff = clock - timedelta(days=7)
+        async with self._lock:
+            rows = await self._all("SELECT * FROM users ORDER BY tg_id")
+        eligible = []
+        for row in rows:
+            raw = (row.get("last_weekly_digest_at") or "").strip()
+            if not raw:
+                eligible.append(row)
+                continue
+            try:
+                sent = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if sent.tzinfo is None:
+                    sent = sent.replace(tzinfo=timezone.utc)
+                if sent <= cutoff:
+                    eligible.append(row)
+            except ValueError:
+                eligible.append(row)
+        return eligible
 
     @durable_write
     async def unlock_with_wuf(self, tg_id: int, chapter_id: int, *, now: datetime | None = None) -> bool:

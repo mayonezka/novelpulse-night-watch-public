@@ -46,6 +46,7 @@ STAGES = (
     '27. /quiz: четыре класса, одноразовый ключ +25 XP, пересылка результата и referral loop; YouTube после успеха каждые 6 часов.',
     '28. Жанровые полки, /start с быстрым возвратом, личная библиотека и честный прогресс завершённых глав; перенос в Cloud.',
     '29. Wait-for-Free: одна бесплатная глава каждые 24 часа, таймер paywall, +15 XP и атомарный перенос в Cloud.',
+    '30. Персонализированный «Дайджест недели NovelPulse», анти-флуд рассылка 0.05с, /send_weekly_digest и автопилот 7 дней.',
 )
 
 
@@ -77,7 +78,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -124,7 +125,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         '5. /brain_sync и /ceo_brief доступны только ADMIN_IDS. Не публиковать .env, токены, ID читателей или незашифрованную кассу.',
         '6. Стрик считается по UTC. Третий последовательный день даёт один ключ; повторное нажатие не даёт награду.', '',
         f'РЕАЛИЗОВАННЫЕ ЭТАПЫ 1–{len(STAGES)} (проверяй live-результаты по журналам соответствующего этапа)', *STAGES, '',
-        'ПУБЛИЧНЫЕ ТОЧКИ ВХОДА',
+        'ПУТИВНЫЕ ТОЧКИ ВХОДА' if False else 'ПУБЛИЧНЫЕ ТОЧКИ ВХОДА',
         'Бот: https://t.me/NovelPulseBot · Канал: https://t.me/novelpulse_litrpg',
         'Портал: https://mayonezka.github.io/novelpulse-library/', '',
         'СЛЕДУЮЩИЕ ВЕКТОРЫ РОСТА',
@@ -139,6 +140,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 27: ' + state.get('stage27_verification','ещё не зафиксированы; см. data/stage27_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 28: ' + state.get('stage28_verification','ещё не зафиксированы; см. data/stage28_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 29: ' + state.get('stage29_verification','ещё не зафиксированы; см. data/stage29_full_tests.log и live-отчёт.'), '',
+        'Проверки Stage 30: ' + state.get('stage30_verification','ещё не зафиксированы; см. data/stage30_full_tests.log и live-отчёт.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)
     return text

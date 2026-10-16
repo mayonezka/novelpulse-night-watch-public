@@ -122,7 +122,7 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                                     'player_xp':0,'player_rank':'F','chapters_read_count':0,
                                     'channel_sub_reward_claimed':0,'quiz_completed':0,'quiz_class_result':'',
                                     'quiz_answers':'','quiz_session':'','last_read_series_id':None,'last_read_chapter_id':None,
-                                    'last_wuf_unlock_at':''}
+                                    'last_wuf_unlock_at':'','last_weekly_digest_at':''}
                         missing_streak = set(columns) - set(row)
                         if not missing_streak <= defaults.keys():
                             raise ValueError('Invalid row schema: users')

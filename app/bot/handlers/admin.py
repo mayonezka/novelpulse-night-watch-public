@@ -525,6 +525,40 @@ async def autopublish_short(message: Message, command: CommandObject, bot: Bot, 
         await message.answer('❌ ' + failure_reason(error))
 
 
+async def send_weekly_digest(message: Message, command: CommandObject, bot: Bot, db: Database) -> None:
+    from app.digest import send_weekly_digest_broadcast
+    mode = (command.args or "").strip().lower()
+    if mode not in ("preview", "broadcast"):
+        await message.answer(
+            "Использование:\n"
+            "/send_weekly_digest preview — тестовое превью дайджеста администратору\n"
+            "/send_weekly_digest broadcast — живая рассылка дайджеста всем подходящим читателям"
+        )
+        return
+    try:
+        dry_run = mode == "preview"
+        report = await send_weekly_digest_broadcast(
+            db,
+            bot,
+            dry_run=dry_run,
+            admin_id=message.from_user.id if message.from_user else None,
+        )
+        if dry_run:
+            await message.answer(
+                f"✅ Превью еженедельного дайджеста отправлено администратору (message_id={report.get('preview_message_id')})."
+            )
+        else:
+            await message.answer(
+                "📬 Рассылка «Дайджест недели NovelPulse» завершена:\n"
+                f"• Подходящих читателей: {report['eligible']}\n"
+                f"• Успешно доставлено: {report['sent']}\n"
+                f"• Бот заблокирован / недоступен: {report['blocked']}\n"
+                f"• Прочие ошибки: {report['failed']}"
+            )
+    except Exception as error:
+        await message.answer("❌ " + failure_reason(error))
+
+
 def create_router() -> Router:
     router = Router(name="admin")
     router.message.register(brain_sync, Command('brain_sync', 'ceo_brief'), IsAdmin())
@@ -547,5 +581,6 @@ def create_router() -> Router:
     router.message.register(next_short, Command("next_short"), IsAdmin())
     router.message.register(disk_status, Command("disk_status"), IsAdmin())
     router.message.register(autopublish_short, Command("autopublish_short"), IsAdmin())
-    router.message.register(denied, Command("stats", "seed_demo", "promo", "import_trending", "import_rr", "post_channel", "traffic_pack", "video_pack", "notify_series", "seo_pack", "dashboard", "autopilot_now", "seed_channel", "followup_now", "growth_kit", "next_short", "disk_status", "autopublish_short"))
+    router.message.register(send_weekly_digest, Command("send_weekly_digest"), IsAdmin())
+    router.message.register(denied, Command("stats", "seed_demo", "promo", "import_trending", "import_rr", "post_channel", "traffic_pack", "video_pack", "notify_series", "seo_pack", "dashboard", "autopilot_now", "seed_channel", "followup_now", "growth_kit", "next_short", "disk_status", "autopublish_short", "send_weekly_digest"))
     return router

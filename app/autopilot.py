@@ -126,6 +126,12 @@ async def _run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | N
                                     for item in report["followups"]["errors"])
         except Exception as error:
             report["errors"].append({"id": 0, "step": "followup", "reason": failure_reason(error)})
+        try:
+            from app.digest import run_autopilot_weekly_digest
+            report["weekly_digest"] = (await run_autopilot_weekly_digest(db, bot)
+                if settings.node_mode != 'youtube_factory' else {'triggered': False, 'owner': 'bot_24x7'})
+        except Exception as error:
+            report["errors"].append({"id": 0, "step": "weekly_digest", "reason": failure_reason(error)})
         if settings.channel_id is not None:
             try:
                 report["serial"] = await publish_next_serial(db, bot, settings.channel_id,
