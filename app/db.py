@@ -31,6 +31,15 @@ def durable_write(method):
     return invoke
 
 
+GENRES = {
+    'litrpg': ('⚔️ ЛитРПГ и Система','⚔️ ЛитРПГ'),
+    'cultivation': ('🌱 Культивация и Прокачка','🌱 Культивация'),
+    'isekai': ('🌀 Исэкай и Попаданцы','🌀 Исэкай'),
+    'science_magic': ('⚡ Научная магия и Sci-Fi','⚡ Научная магия'),
+    'taming': ('🐾 Приручение и Эволюция','🐾 Приручение'),
+    'comedy_isekai': ('✨ Комедия и Исэкай','✨ Комедия и Исэкай'),
+}
+
 MIGRATIONS = (
     """
     CREATE TABLE IF NOT EXISTS users (
@@ -309,6 +318,10 @@ MIGRATIONS = (
     ALTER TABLE xp_events_stage27 RENAME TO xp_events;
     DROP TRIGGER IF EXISTS cashier_users_update;
     """,
+    """
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    DROP TRIGGER IF EXISTS catalog_series_update;
+    """,
 )
 
 
@@ -356,6 +369,25 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 20:
+                    columns={row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    for name in ('last_read_series_id','last_read_chapter_id'):
+                        if name not in columns:
+                            await self.connection.execute(f'ALTER TABLE users ADD COLUMN {name} INTEGER')
+                    columns={row['name'] for row in await self._all('PRAGMA table_info(series)')}
+                    for name,definition in (('genre_slug',"TEXT NOT NULL DEFAULT 'litrpg'"),
+                        ('genre_title',"TEXT NOT NULL DEFAULT '⚔️ ЛитРПГ и Система'")):
+                        if name not in columns:
+                            await self.connection.execute(f'ALTER TABLE series ADD COLUMN {name} {definition}')
+                    for sid,slug in ((1,'litrpg'),(3,'cultivation'),(4,'isekai'),(5,'science_magic'),(6,'taming'),(7,'comedy_isekai')):
+                        await self.connection.execute("UPDATE series SET genre_slug=?,genre_title=? WHERE id=? AND genre_slug='litrpg'",
+                            (slug,GENRES[slug][0],sid))
+                    await self.connection.execute('UPDATE users SET last_read_chapter_id=(SELECT c.id FROM reading_progress r '
+                        'JOIN chapters c ON c.series_id=r.series_id AND c.chapter_num<=r.chapter_num AND c.is_published=1 '
+                        'WHERE r.tg_id=users.tg_id ORDER BY julianday(r.updated_at) DESC,c.chapter_num DESC LIMIT 1) '
+                        'WHERE last_read_chapter_id IS NULL')
+                    await self.connection.execute('UPDATE users SET last_read_series_id=(SELECT series_id FROM chapters '
+                        'WHERE id=users.last_read_chapter_id) WHERE last_read_series_id IS NULL')
                 if index == 19:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     for name,definition in (
@@ -649,6 +681,46 @@ class Database:
             return await self._one("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
 
     @durable_write
+    async def remember_chapter(self, tg_id: int, chapter_id: int) -> None:
+        """Remember a real reader entry, including a locked teaser; never award XP here."""
+        async with self._lock:
+            await self.connection.execute('UPDATE users SET last_read_chapter_id=?,last_read_series_id='
+                '(SELECT series_id FROM chapters WHERE id=?) WHERE tg_id=? AND EXISTS('
+                'SELECT 1 FROM chapters c WHERE c.id=? AND (c.is_published=1 OR EXISTS('
+                'SELECT 1 FROM purchases p WHERE p.tg_id=? AND p.chapter_id=c.id)))',
+                (chapter_id,chapter_id,tg_id,chapter_id,tg_id))
+
+    async def library_progress(self, tg_id: int, series_id: int | None = None, *, only_started=False) -> list[dict]:
+        async with self._lock:
+            return await self._all('WITH viewer AS (SELECT ? AS tg_id) SELECT s.*, '
+                '(SELECT COUNT(*) FROM chapters c WHERE c.series_id=s.id AND c.is_published=1) AS total_chapters, '
+                "(SELECT COUNT(*) FROM xp_events e JOIN chapters c ON e.event_key='read:'||c.id "
+                "WHERE e.tg_id=v.tg_id AND e.kind='read' AND c.series_id=s.id AND c.is_published=1) AS read_count, "
+                'COALESCE((SELECT c.id FROM users u JOIN chapters c ON c.id=u.last_read_chapter_id '
+                'WHERE u.tg_id=v.tg_id AND c.series_id=s.id AND (c.is_published=1 OR EXISTS('
+                'SELECT 1 FROM purchases p WHERE p.tg_id=v.tg_id AND p.chapter_id=c.id))), '
+                '(SELECT c.id FROM reading_progress r JOIN chapters c ON c.series_id=r.series_id '
+                'AND c.chapter_num<=r.chapter_num AND c.is_published=1 WHERE r.tg_id=v.tg_id AND r.series_id=s.id '
+                'ORDER BY c.chapter_num DESC LIMIT 1), '
+                '(SELECT p.chapter_id FROM purchases p JOIN chapters c ON c.id=p.chapter_id '
+                'WHERE p.tg_id=v.tg_id AND c.series_id=s.id ORDER BY p.id DESC LIMIT 1), '
+                '(SELECT c.id FROM chapters c WHERE c.series_id=s.id AND c.is_published=1 ORDER BY c.chapter_num LIMIT 1)) AS resume_id '
+                'FROM series s CROSS JOIN viewer v WHERE (? IS NULL OR s.id=?) AND (?=0 OR EXISTS('
+                'SELECT 1 FROM reading_progress r WHERE r.tg_id=v.tg_id AND r.series_id=s.id) OR EXISTS('
+                'SELECT 1 FROM purchases p JOIN chapters c ON c.id=p.chapter_id WHERE p.tg_id=v.tg_id AND c.series_id=s.id)) '
+                'ORDER BY s.id',(tg_id,series_id,series_id,int(only_started)))
+
+    async def resume_info(self, tg_id: int) -> dict | None:
+        async with self._lock:
+            chapter=await self._one('SELECT c.id,c.series_id,c.chapter_num,s.title AS series_title FROM users u '
+                'JOIN chapters c ON c.id=u.last_read_chapter_id AND c.series_id=u.last_read_series_id '
+                'JOIN series s ON s.id=c.series_id WHERE u.tg_id=? AND (c.is_published=1 OR EXISTS('
+                'SELECT 1 FROM purchases p WHERE p.tg_id=u.tg_id AND p.chapter_id=c.id))',(tg_id,))
+        if not chapter:return None
+        progress=await self.library_progress(tg_id,chapter['series_id'])
+        return {**chapter,**{k:progress[0][k] for k in ('read_count','total_chapters')}}
+
+    @durable_write
     async def record_read(self, tg_id: int, series_id: int, chapter_num: int, *, completed: bool = True) -> None:
         """Called only after an accessible chapter was delivered in a private chat."""
         async with self._lock:
@@ -663,6 +735,8 @@ class Database:
                     "chapter_num = MAX(reading_progress.chapter_num, excluded.chapter_num), "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", (tg_id, series_id, chapter_num))
                 if completed:await self._award_xp(tg_id,f"read:{chapter['id']}",'read')
+                await self.connection.execute('UPDATE users SET last_read_series_id=?,last_read_chapter_id=? WHERE tg_id=?',
+                    (series_id,chapter['id'],tg_id))
                 await self.connection.commit()
             except BaseException:
                 await self.connection.rollback();raise

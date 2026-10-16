@@ -10,7 +10,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
     InlineQuery,InlineQueryResultArticle,InputTextMessageContent,InlineQueryResultsButton)
 
 from app.config import Settings
-from app.db import Database
+from app.db import Database, GENRES
 from app.text import split_text
 from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
 from app.gamification import notify_levelups, status_window
@@ -56,15 +56,55 @@ async def send_text(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMar
                                reply_markup=markup if index == len(chunks) - 1 else None)
 
 
-async def show_catalog(bot: Bot, chat_id: int, db: Database) -> None:
+def progress_bar(read_count: int, total: int) -> str:
+    read_count=max(0,min(read_count,total))
+    blocks=min(8,read_count*8//total) if total else 0
+    return f"[{'█'*blocks}{'░'*(8-blocks)}] {read_count}/{total} глав"
+
+
+def genre_rows() -> list[list[InlineKeyboardButton]]:
+    items=[button(label,f'genre:{slug}') for slug,(_,label) in GENRES.items()]
+    return [items[i:i+2] for i in range(0,len(items),2)]+[[button('🎧 С аудио','genre:audio')]]
+
+
+async def show_catalog(bot: Bot, chat_id: int, db: Database, genre: str | None=None) -> None:
     series = await db.list_series()
-    if not series:
+    if not series and genre is None:
         await bot.send_message(chat_id, "📚 Каталог пока пуст. Новые миры и переводы уже в пути!")
         return
+    if genre and genre!='audio':
+        series=[s for s in series if s['genre_slug']==genre or genre=='isekai' and s['genre_slug']=='comedy_isekai']
+    heading='📖 Каталог новелл\nВыберите мир, в который отправитесь сегодня:'
+    if genre:
+        heading='📖 Каталог новелл · '+('🎧 С аудио\nАудиоглавы доступны по запросу в читалке.' if genre=='audio' else GENRES[genre][0])
+    if not series:
+        await bot.send_message(chat_id,heading+'\nНа этой полке пока нет новелл.',reply_markup=keyboard([[button('🔙 Назад к каталогу','catalog')]]))
+        return
     for offset in range(0, len(series), 50):
-        rows = [[button(item["title"][:100], f"series:{item['id']}")] for item in series[offset:offset + 50]]
+        rows = genre_rows() if genre is None else []
+        rows.extend([[button(item["title"][:100], f"series:{item['id']}")] for item in series[offset:offset + 50]])
+        if genre:rows.append([button('🔙 Назад к каталогу','catalog')])
+        rows.append([button('🔖 Моя полка','library')])
         rows.append([button("👑 Купить VIP-доступ", "vip")])
-        await bot.send_message(chat_id, "📖 Каталог новелл\nВыберите мир, в который отправитесь сегодня:", reply_markup=keyboard(rows))
+        await bot.send_message(chat_id,heading,reply_markup=keyboard(rows))
+
+
+async def show_library(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message,Message):return
+    await db.ensure_user(query.from_user.id,query.from_user.username)
+    books=await db.library_progress(query.from_user.id,only_started=True)
+    if not books:
+        await query.message.answer('У вас пока нет начатых книг. Выберите новеллу в каталоге!',
+            reply_markup=keyboard([[button('📖 Каталог новелл','catalog')]]))
+        return
+    for book in books:
+        rows=[]
+        if book['resume_id']:rows.append([button('▶️ Продолжить чтение',f"read:{book['resume_id']}")])
+        rows.append([button('📖 Все главы',f"series:{book['id']}")])
+        await query.message.answer(f"📖 «{book['title']}» · Прочитано {book['read_count']}/{book['total_chapters']} глав\n"
+            +progress_bar(book['read_count'],book['total_chapters']),reply_markup=keyboard(rows),parse_mode=None)
+    await query.message.answer('🔖 Ваша личная полка',reply_markup=keyboard([[button('🔙 Назад к каталогу','catalog')]]))
 
 
 async def show_series(bot: Bot, chat_id: int, series_id: int, db: Database) -> None:
@@ -73,7 +113,9 @@ async def show_series(bot: Bot, chat_id: int, series_id: int, db: Database) -> N
     if not series or not chapters:
         await bot.send_message(chat_id, "Эта новелла пока недоступна. Загляните в /catalog.")
         return
-    await send_text(bot, chat_id, f"📚 {series['title']}\n\n{series['description']}")
+    progress=await db.library_progress(chat_id,series_id)
+    summary=progress_bar(progress[0]['read_count'],progress[0]['total_chapters']) if progress else ''
+    await send_text(bot, chat_id, f"📚 {series['title']}\n{series['genre_title']}\n{summary}\n\n{series['description']}")
     for offset in range(0, len(chapters), 50):
         rows = []
         for chapter in chapters[offset:offset + 50]:
@@ -174,6 +216,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
             await send_text(bot, chat_id, text, keyboard(rows))
         if chat_id == tg_id:
             await db.log_paywall_view(tg_id, chapter_id)
+            await db.remember_chapter(tg_id,chapter_id)
 
 
 async def listen(query: CallbackQuery, bot: Bot, db: Database, audio_jobs, cashier_lease=None) -> None:
@@ -186,9 +229,11 @@ async def listen(query: CallbackQuery, bot: Bot, db: Database, audio_jobs, cashi
     if chapter is None:
         await query.message.answer('Глава пока недоступна. Откройте /catalog.')
         return
+    await db.remember_chapter(query.from_user.id,chapter_id)
     if not await db.can_read(query.from_user.id, chapter):
         await show_chapter(bot,query.message.chat.id,query.from_user.id,chapter_id,db,audio_locked=True)
         return
+    await db.record_read(query.from_user.id,chapter['series_id'],chapter['chapter_num'],completed=False)
     result = audio_jobs.start(bot,db,query.from_user.id,query.message.chat.id,chapter_id,lease=cashier_lease)
     await query.message.answer({'started':'🎧 Озвучиваю главу. Аудиокнига скоро появится здесь; пока можно продолжить чтение.',
         'duplicate':'⏳ Ваша аудиоглава уже готовится. Дождитесь её отправки.',
@@ -231,14 +276,20 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
     elif command.args == 'quiz':
         await quiz_command(message,bot,db)
     else:
-        await message.answer(WELCOME, reply_markup=keyboard([
+        resume=await db.resume_info(message.from_user.id)
+        rows=[]
+        welcome=WELCOME
+        if resume:
+            rows.append([button(f"▶️ Продолжить чтение: «{resume['series_title'][:52]}» (Гл. {resume['chapter_num']})",f"read:{resume['id']}")])
+            welcome+='\n\n'+progress_bar(resume['read_count'],resume['total_chapters'])
+        await message.answer(welcome, reply_markup=keyboard(rows+[
             [button("📖 Каталог новелл", "catalog")], [button("👑 Купить VIP-доступ", "vip")],
+            [button('🔖 Моя полка','library')],
             [button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
             [button("🎁 Дар Системы (Стрик)", "daily_gift")],
             [button('👤 Мой Ранг в Системе','profile')],
             [button('🔮 Узнать свой класс (Тест)','quiz')],
         ] + subscription_reward_rows(await db.get_user(message.from_user.id))))
-        await show_catalog(bot, message.chat.id, db)
 
 
 async def display_quiz(message: Message, bot: Bot, db: Database, user: dict, *, edit=False) -> None:
@@ -425,11 +476,13 @@ async def navigate(query: CallbackQuery, bot: Bot, db: Database) -> None:
     await db.ensure_user(query.from_user.id, query.from_user.username)
     if query.data == "catalog":
         await show_catalog(bot, query.message.chat.id, db)
+    elif query.data.startswith('genre:'):
+        await show_catalog(bot,query.message.chat.id,db,query.data.split(':')[1])
     elif query.data.startswith("page:"):
         _, chapter_id, page = query.data.split(":")
         await show_chapter(bot, query.message.chat.id, query.from_user.id, int(chapter_id), db,
                            page=int(page), edit_message_id=query.message.message_id)
-    elif query.data.startswith("chapter:"):
+    elif query.data.startswith(("chapter:",'read:')):
         await show_chapter(bot, query.message.chat.id, query.from_user.id, int(query.data.split(":")[1]), db)
     else:
         await show_series(bot, query.message.chat.id, int(query.data.split(":")[1]), db)
@@ -523,6 +576,7 @@ def create_router() -> Router:
     router.callback_query.register(daily_gift, F.data == "daily_gift")
     router.callback_query.register(claim_sub_key, F.data == 'claim_sub_key')
     router.callback_query.register(quiz_callback, F.data=='quiz')
+    router.callback_query.register(show_library,F.data=='library')
     router.callback_query.register(quiz_callback, F.data.regexp(r'^qz:[0-9a-f]{8}:[0-3]:[0-3]$'))
     router.inline_query.register(quiz_inline)
     router.callback_query.register(profile_callback, F.data == 'profile')
@@ -530,5 +584,5 @@ def create_router() -> Router:
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
     router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))
     router.callback_query.register(navigate, F.data.regexp(
-        r"^(catalog|(?:series|chapter):[1-9][0-9]{0,17}|page:[1-9][0-9]{0,17}:[0-9]{1,6})$"))
+        r"^(catalog|genre:(?:litrpg|cultivation|isekai|science_magic|taming|comedy_isekai|audio)|(?:series|chapter|read):[1-9][0-9]{0,17}|page:[1-9][0-9]{0,17}:[0-9]{1,6})$"))
     return router

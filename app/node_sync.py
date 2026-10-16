@@ -29,6 +29,8 @@ class SeriesRecord(Record):
     source_url: str | None
     translation_mode: str
     telegraph_url: str
+    genre_slug: str = Field(default='litrpg',min_length=1,max_length=40)
+    genre_title: str = Field(default='⚔️ ЛитРПГ и Система',min_length=1,max_length=120)
 
 
 class ChapterRecord(Record):
@@ -123,7 +125,11 @@ async def import_catalog(db: Database, data: bytes | str) -> dict:
                 if existing and (existing['slug'] != record.slug or
                         (existing['source_url'] and existing['source_url'] != record.source_url)):
                     raise ValueError(f'Series ID collision: {record.id}; use the same initial catalogue on both nodes')
-                await _upsert(db, 'series', record.model_dump())
+                values=record.model_dump()
+                if existing:
+                    for name in ('genre_slug','genre_title'):
+                        if name not in record.model_fields_set:values[name]=existing[name]
+                await _upsert(db, 'series', values)
             for record in snapshot.chapters:
                 existing = await db._one('SELECT * FROM chapters WHERE id=?', (record.id,))
                 if existing and ((existing['series_id'], existing['chapter_num']) != (record.series_id, record.chapter_num)
