@@ -472,12 +472,8 @@ class CloudFailover:
         """Flush and publish an offline PC lease while Windows still permits I/O."""
         self.request_stop(reason)
         self.db.durability_hook=None
-        if self.heartbeat_thread:
-            self.heartbeat_thread.closed.set()
         if self.role!='pc' or not self.owned:
             return False
-        if self.heartbeat_thread:
-            self.heartbeat_thread.closed.set()
         try:
             payload=await asyncio.wait_for(dump_cashier(self.db,self.bot_id),timeout=.12)
             dirty=self.last_revision is None or payload['revision']!=self.last_revision
@@ -501,6 +497,8 @@ class CloudFailover:
         except Exception as error:
             logger.warning('Power-event lease publish failed: %s',type(error).__name__)
             return False
+        finally:
+            if self.heartbeat_thread:self.heartbeat_thread.closed.set()
 
     def emergency_release_sync(self, loop, reason, *, timeout=1.9):
         """Win32 callbacks are synchronous, but bounded to the OS's 2s budget."""
