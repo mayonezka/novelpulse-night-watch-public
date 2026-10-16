@@ -3,3 +3,4 @@ PyNaCl>=1.5,<2
 cryptography>=43,<47
 edge-tts>=7.3,<8
 mutagen>=1.47,<2
+Pillow>=11,<13

@@ -2,12 +2,14 @@
 
 import re
 import logging
+from pathlib import Path
+from urllib.parse import urlencode
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
-    InlineQuery,InlineQueryResultArticle,InputTextMessageContent,InlineQueryResultsButton)
+    InlineQuery,InlineQueryResultArticle,InputTextMessageContent,InlineQueryResultsButton,FSInputFile)
 
 from app.config import Settings
 from app.db import Database, GENRES, wuf_status
@@ -43,6 +45,12 @@ def keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 
 def button(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def render_player_story_card(user_row: dict, series_title: str = ''):
+    """Load Pillow only for a share-card request so the phone bot stays lightweight."""
+    from app.story_card import render_player_story_card as render
+    return render(user_row, series_title)
 
 
 def subscription_reward_rows(user: dict | None) -> list[list[InlineKeyboardButton]]:
@@ -187,6 +195,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
                       "и читать ВСЕ главы всех новелл без ограничений.") if offer["has_purchased"] else ""
         rows = []
         rows.extend(subscription_reward_rows(account))
+        rows.append([button('📸 Выложить карточку в Stories (+2 ключа!)', 'share_story_card')])
         if not await db.has_used_peek(tg_id, chapter_id):
             rows.append([button(PEEK_LABEL, f'peek:{chapter_id}')])
         timer = wuf_status(account['last_wuf_unlock_at'] if account else '')
@@ -451,7 +460,8 @@ async def profile(message: Message, bot: Bot, db: Database) -> None:
     await notify_levelups(bot,db,message.from_user.id)
     user=await db.get_user(message.from_user.id)
     await message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
-        subscription_reward_rows(user) + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+        subscription_reward_rows(user) + [[button('📸 Выложить карточку в Stories (+2 ключа!)','share_story_card')]
+        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
 
 
 async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -461,7 +471,53 @@ async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None
     await notify_levelups(bot,db,query.from_user.id)
     user=await db.get_user(query.from_user.id)
     await query.message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
-        subscription_reward_rows(user) + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+        subscription_reward_rows(user) + [[button('📸 Выложить карточку в Stories (+2 ключа!)','share_story_card')]
+        ] + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+
+
+async def share_story_card(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    """Send the user's temporary rank card and remove it even if Telegram fails."""
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    tg_id = query.from_user.id
+    await db.ensure_user(tg_id, query.from_user.username)
+    user = await db.get_user(tg_id)
+    path = render_player_story_card(user)
+    try:
+        bot_user = await bot.get_me()
+        share_url = 'https://t.me/share/url?' + urlencode({
+            'url': f'https://t.me/{bot_user.username}?start=ref_{tg_id}',
+            'text': f"Мой ранг в Системе: {user['player_rank']}-ранг! Читай бесплатно в NovelPulse",
+        })
+        markup = keyboard([
+            [InlineKeyboardButton(text='📲 Опубликовать в Stories', url=share_url)],
+            [button('🎁 Забрать +2 ключа и 50 XP', 'claim_story_chest')],
+        ])
+        await bot.send_photo(
+            chat_id=query.message.chat.id,
+            photo=FSInputFile(path),
+            caption=('🏆 Ваша персональная карточка ранга готова!\n'
+                'Опубликуйте её в своих Telegram Stories, чтобы друзья узнали ваш ранг в Системе.\n\n'
+                '🎁 Нажмите кнопку ниже, чтобы забрать награду:'),
+            reply_markup=markup,
+        )
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+async def claim_story_chest(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    await db.ensure_user(query.from_user.id, query.from_user.username)
+    claimed = await db.claim_story_reward(query.from_user.id)
+    if claimed:
+        text = '🎉 [СУНДУК ЗА ИСТОРИЮ ОТКРЫТ!]\nВам начислено +2 🔑 бесплатных ключа и +50 XP! Приятного чтения!'
+        await notify_levelups(bot, db, query.from_user.id)
+    else:
+        text = 'Вы уже получили награду за публикацию истории!'
+    await query.message.answer(text, parse_mode=None)
 
 
 async def catalog(message: Message, bot: Bot, db: Database) -> None:
@@ -604,6 +660,8 @@ def create_router() -> Router:
     router.callback_query.register(claim_sub_key, F.data == 'claim_sub_key')
     router.callback_query.register(quiz_callback, F.data=='quiz')
     router.callback_query.register(show_library,F.data=='library')
+    router.callback_query.register(share_story_card,F.data=='share_story_card')
+    router.callback_query.register(claim_story_chest,F.data=='claim_story_chest')
     router.callback_query.register(quiz_callback, F.data.regexp(r'^qz:[0-9a-f]{8}:[0-3]:[0-3]$'))
     router.inline_query.register(quiz_inline)
     router.callback_query.register(profile_callback, F.data == 'profile')

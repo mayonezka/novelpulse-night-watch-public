@@ -48,6 +48,7 @@ STAGES = (
     '29. Wait-for-Free: одна бесплатная глава каждые 24 часа, таймер paywall, +15 XP и атомарный перенос в Cloud.',
     '30. Персонализированный «Дайджест недели NovelPulse», анти-флуд рассылка 0.05с, /send_weekly_digest и автопилот 7 дней.',
     '31. Углубление каталога, новый RoyalRoad Trending, chapter SEO, IndexNow и обновление навигатора.',
+    '32. Карточка ранга 9:16 для Telegram Stories и одноразовый сундук: +2 ключа и +50 XP.',
 )
 
 
@@ -115,7 +116,8 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         f"cloud={cloud.get('cloud_runner',{}).get('mode','не подтверждён')}; heartbeat UTC={cloud.get('heartbeat_at','нет')}.",
         'Сохранённый статус не заменяет live-проверку GitHub/Watchdog.', '',
         'СТРОГИЕ ИНВАРИАНТЫ',
-        '1. После каждой задачи 0 MP4, 0 MP3 и 0 временных изображений в data/. Генерация JIT → доставка → удаление.',
+        '1. После каждой задачи 0 MP4, 0 MP3, 0 PNG и 0 временных изображений в data/. '
+        'Story-карточки создаются вне репозитория, доставляются и удаляются в finally.',
         '2. NovelPulse_Watchdog каждые 5 минут; один polling worker pythonw.exe, detached. '
         'Тяжёлое видео — изолированный subprocess. Историческая локальная dispatcher p95 ≈43 мс; это не гарантия сетевой задержки.',
         '3. Публичный Night-Watch остаётся HOT_STANDBY, cashier и каталог зашифрованы Fernet. '

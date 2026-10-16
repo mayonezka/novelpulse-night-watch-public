@@ -339,6 +339,18 @@ MIGRATIONS = (
     """
     DROP TRIGGER IF EXISTS cashier_users_update;
     """,
+    """
+    ALTER TABLE users ADD COLUMN story_reward_claimed INTEGER NOT NULL DEFAULT 0 CHECK(story_reward_claimed IN (0,1));
+    CREATE TABLE xp_events_stage32 (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap','subscription','quiz','wuf','story')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    INSERT INTO xp_events_stage32 SELECT tg_id,event_key,kind,amount FROM xp_events;
+    DROP TABLE xp_events;
+    ALTER TABLE xp_events_stage32 RENAME TO xp_events;
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    """,
 )
 
 
@@ -408,6 +420,23 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == len(MIGRATIONS) - 1:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    if 'story_reward_claimed' not in columns:
+                        await self.connection.execute('ALTER TABLE users ADD COLUMN story_reward_claimed '
+                            'INTEGER NOT NULL DEFAULT 0 CHECK(story_reward_claimed IN (0,1))')
+                    xp_schema = await self._one("SELECT sql FROM sqlite_master WHERE type='table' AND name='xp_events'")
+                    if xp_schema and "'story'" not in xp_schema['sql']:
+                        await self.connection.execute("CREATE TABLE xp_events_stage32 (tg_id INTEGER NOT NULL REFERENCES users(tg_id), "
+                            "event_key TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN "
+                            "('read','checkin','referral','purchase','bootstrap','subscription','quiz','wuf','story')), "
+                            "amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key))")
+                        await self.connection.execute('INSERT INTO xp_events_stage32 SELECT tg_id,event_key,kind,amount FROM xp_events')
+                        await self.connection.execute('DROP TABLE xp_events')
+                        await self.connection.execute('ALTER TABLE xp_events_stage32 RENAME TO xp_events')
+                    await self.connection.execute('DROP TRIGGER IF EXISTS cashier_users_update')
+                    await self.connection.execute(f'PRAGMA user_version = {index + 1}')
+                    continue
                 if index == 22:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     if 'last_weekly_digest_at' not in columns:
@@ -575,6 +604,24 @@ class Database:
                 claimed = cursor.rowcount == 1
                 if claimed:
                     await self._award_xp(tg_id, 'channel_subscription', 'subscription')
+                await self.connection.commit()
+                return claimed
+            except BaseException:
+                await self.connection.rollback()
+                raise
+
+    @durable_write
+    async def claim_story_reward(self, tg_id: int) -> bool:
+        """Grant the Stories chest once, with its XP event and keys in the same commit."""
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                cursor = await self.connection.execute(
+                    'UPDATE users SET story_reward_claimed=1,free_unlock_credits=free_unlock_credits+2 '
+                    'WHERE tg_id=? AND story_reward_claimed=0', (tg_id,))
+                claimed = cursor.rowcount == 1
+                if claimed:
+                    await self._award_xp(tg_id, 'story_chest', 'story')
                 await self.connection.commit()
                 return claimed
             except BaseException:
