@@ -298,6 +298,17 @@ MIGRATIONS = (
     ALTER TABLE xp_events_stage26 RENAME TO xp_events;
     DROP TRIGGER IF EXISTS cashier_users_update;
     """,
+    """
+    CREATE TABLE xp_events_stage27 (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap','subscription','quiz')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    INSERT INTO xp_events_stage27 SELECT tg_id,event_key,kind,amount FROM xp_events;
+    DROP TABLE xp_events;
+    ALTER TABLE xp_events_stage27 RENAME TO xp_events;
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    """,
 )
 
 
@@ -345,6 +356,15 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 19:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    for name,definition in (
+                        ('quiz_completed','INTEGER NOT NULL DEFAULT 0 CHECK(quiz_completed IN (0,1))'),
+                        ('quiz_class_result',"TEXT NOT NULL DEFAULT ''"),
+                        ('quiz_answers',"TEXT NOT NULL DEFAULT '' CHECK(length(quiz_answers)<=4 AND quiz_answers NOT GLOB '*[^0-3]*')"),
+                        ('quiz_session',"TEXT NOT NULL DEFAULT ''")):
+                        if name not in columns:
+                            await self.connection.execute(f'ALTER TABLE users ADD COLUMN {name} {definition}')
                 if index == 18:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     if 'channel_sub_reward_claimed' not in columns:
@@ -421,6 +441,45 @@ class Database:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
+
+    @durable_write
+    async def begin_quiz(self, tg_id: int) -> dict:
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                user=await self._one('SELECT * FROM users WHERE tg_id=?',(tg_id,))
+                if user is None:raise ValueError('Reader must register first')
+                if not user['quiz_completed'] and not user['quiz_session']:
+                    await self.connection.execute('UPDATE users SET quiz_session=?,quiz_answers=? WHERE tg_id=?',
+                        (secrets.token_hex(4),'',tg_id))
+                result=await self._one('SELECT * FROM users WHERE tg_id=?',(tg_id,))
+                await self.connection.commit();return result
+            except BaseException:
+                await self.connection.rollback();raise
+
+    @durable_write
+    async def answer_quiz(self, tg_id: int, session: str, question: int, choice: int) -> dict:
+        from app.quiz import valid_answer,calculate_class
+        if not valid_answer(question,choice):raise ValueError('Invalid quiz answer')
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                user=await self._one('SELECT * FROM users WHERE tg_id=?',(tg_id,))
+                if user is None:raise ValueError('Reader must register first')
+                accepted=not user['quiz_completed'] and bool(session) and session==user['quiz_session'] and question==len(user['quiz_answers'])
+                if accepted:
+                    answers=user['quiz_answers']+str(choice)
+                    if len(answers)==4:
+                        title=calculate_class(answers)
+                        await self.connection.execute('UPDATE users SET quiz_answers=?,quiz_completed=1,quiz_class_result=?, '
+                            'free_unlock_credits=free_unlock_credits+1 WHERE tg_id=?',(answers,title,tg_id))
+                        await self._award_xp(tg_id,'quiz','quiz')
+                    else:
+                        await self.connection.execute('UPDATE users SET quiz_answers=? WHERE tg_id=?',(answers,tg_id))
+                result=await self._one('SELECT * FROM users WHERE tg_id=?',(tg_id,))
+                await self.connection.commit();return {'accepted':bool(accepted),'user':result}
+            except BaseException:
+                await self.connection.rollback();raise
 
     @durable_write
     async def claim_channel_subscription_reward(self, tg_id: int) -> bool:

@@ -6,7 +6,8 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+    InlineQuery,InlineQueryResultArticle,InputTextMessageContent,InlineQueryResultsButton)
 
 from app.config import Settings
 from app.db import Database
@@ -14,6 +15,7 @@ from app.text import split_text
 from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
 from app.gamification import notify_levelups, status_window
 from app.notifications import notify_admins
+from app.quiz import question_card,result_card,recommended_series,referral_text
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
 PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
@@ -226,14 +228,78 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         await show_chapter(bot, message.chat.id, message.from_user.id, int(command.args[3:]), db)
     elif command.args and re.fullmatch(r"series_[1-9][0-9]{0,17}", command.args):
         await show_series(bot, message.chat.id, int(command.args[7:]), db)
+    elif command.args == 'quiz':
+        await quiz_command(message,bot,db)
     else:
         await message.answer(WELCOME, reply_markup=keyboard([
             [button("📖 Каталог новелл", "catalog")], [button("👑 Купить VIP-доступ", "vip")],
             [button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
             [button("🎁 Дар Системы (Стрик)", "daily_gift")],
             [button('👤 Мой Ранг в Системе','profile')],
+            [button('🔮 Узнать свой класс (Тест)','quiz')],
         ] + subscription_reward_rows(await db.get_user(message.from_user.id))))
         await show_catalog(bot, message.chat.id, db)
+
+
+async def display_quiz(message: Message, bot: Bot, db: Database, user: dict, *, edit=False) -> None:
+    if user['quiz_completed']:
+        me=await bot.get_me()
+        series=recommended_series(user['quiz_class_result'],await db.list_series())
+        # Owner selected Telegram Share; it works without BotFather inline mode.
+        text,markup=result_card(user,series,me.username,inline_enabled=False)
+    else:
+        text,markup=question_card(user)
+    if edit:
+        try:
+            await message.edit_text(text,reply_markup=markup,parse_mode=None)
+        except TelegramBadRequest as error:
+            if 'message is not modified' not in error.message.lower():raise
+    else:
+        await message.answer(text,reply_markup=markup,parse_mode=None)
+
+
+async def quiz_command(message: Message, bot: Bot, db: Database) -> None:
+    if not message.from_user:return
+    await db.ensure_user(message.from_user.id,message.from_user.username)
+    user=await db.begin_quiz(message.from_user.id)
+    await display_quiz(message,bot,db,user)
+
+
+async def quiz_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
+    await query.answer()
+    if not isinstance(query.message,Message):return
+    await db.ensure_user(query.from_user.id,query.from_user.username)
+    if query.data=='quiz':
+        user=await db.begin_quiz(query.from_user.id)
+    else:
+        _,session,index,choice=query.data.split(':')
+        try:
+            result=await db.answer_quiz(query.from_user.id,session,int(index),int(choice))
+        except ValueError:
+            await query.message.answer('Эта кнопка устарела. Откройте /quiz, чтобы продолжить тест.')
+            return
+        user=result['user']
+        if not user['quiz_session'] and not user['quiz_completed']:
+            await query.message.answer('Откройте /quiz, чтобы начать тест Системы.')
+            return
+    await display_quiz(query.message,bot,db,user,edit=True)
+    if user['quiz_completed']:await notify_levelups(bot,db,query.from_user.id)
+
+
+async def quiz_inline(query: InlineQuery, bot: Bot, db: Database) -> None:
+    user=await db.get_user(query.from_user.id)
+    if not user or not user['quiz_completed']:
+        await query.answer([],is_personal=True,cache_time=0,
+            button=InlineQueryResultsButton(text='🔮 Узнать свой класс',start_parameter='quiz'))
+        return
+    me=await bot.get_me()
+    text=referral_text(user['quiz_class_result'],me.username,query.from_user.id)
+    article=InlineQueryResultArticle(id=f'quiz-{query.from_user.id}',title='🔮 '+user['quiz_class_result'],
+        description='Мой скрытый класс S-ранга. Пройди тест и узнай свой!',
+        input_message_content=InputTextMessageContent(message_text=text,parse_mode=None),
+        reply_markup=keyboard([[InlineKeyboardButton(text='🔮 Узнать свой скрытый класс',
+            url=f'https://t.me/{me.username}?start=ref_{query.from_user.id}')]]))
+    await query.answer([article],is_personal=True,cache_time=0)
 
 
 async def claim_sub_key(query: CallbackQuery, bot: Bot, db: Database, settings: Settings) -> None:
@@ -448,6 +514,7 @@ def create_router() -> Router:
     router.message.register(start, CommandStart(), private)
     router.message.register(catalog, Command("catalog"), private)
     router.message.register(profile, Command('profile'), private)
+    router.message.register(quiz_command, Command('quiz'), private)
     router.message.register(terms, Command("terms"), private)
     router.message.register(payment_support, Command("paysupport", "support"), private)
     router.callback_query.filter(F.message.chat.type == "private")
@@ -455,6 +522,9 @@ def create_router() -> Router:
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(daily_gift, F.data == "daily_gift")
     router.callback_query.register(claim_sub_key, F.data == 'claim_sub_key')
+    router.callback_query.register(quiz_callback, F.data=='quiz')
+    router.callback_query.register(quiz_callback, F.data.regexp(r'^qz:[0-9a-f]{8}:[0-3]:[0-3]$'))
+    router.inline_query.register(quiz_inline)
     router.callback_query.register(profile_callback, F.data == 'profile')
     router.callback_query.register(listen, F.data.regexp(r'^listen:[1-9][0-9]{0,17}$'))
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))
