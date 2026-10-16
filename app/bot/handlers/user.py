@@ -17,6 +17,7 @@ from app.notifications import notify_admins
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
 PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
+SUBSCRIPTION_LABEL = '🎁 Получить +1 ключ за подписку на канал'
 
 
 def deep_peek_excerpt(text: str) -> str:
@@ -40,6 +41,10 @@ def keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 
 def button(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def subscription_reward_rows(user: dict | None) -> list[list[InlineKeyboardButton]]:
+    return [[button(SUBSCRIPTION_LABEL, 'claim_sub_key')]] if user and not user.get('channel_sub_reward_claimed', 0) else []
 
 
 async def send_text(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
@@ -137,6 +142,7 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
             banner = ("\n\n💡 Вы уже открыли первую платную главу! Дальше выгоднее взять 👑 VIP на 7 дней (49 ⭐️) "
                       "и читать ВСЕ главы всех новелл без ограничений.") if offer["has_purchased"] else ""
         rows = []
+        rows.extend(subscription_reward_rows(account))
         if not await db.has_used_peek(tg_id, chapter_id):
             rows.append([button(PEEK_LABEL, f'peek:{chapter_id}')])
         rows.append([button(label, f"buy:{chapter_id}")])
@@ -226,8 +232,57 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
             [button("🎁 Читать бесплатно (Пригласить друга)", "referral")],
             [button("🎁 Дар Системы (Стрик)", "daily_gift")],
             [button('👤 Мой Ранг в Системе','profile')],
-        ]))
+        ] + subscription_reward_rows(await db.get_user(message.from_user.id))))
         await show_catalog(bot, message.chat.id, db)
+
+
+async def claim_sub_key(query: CallbackQuery, bot: Bot, db: Database, settings: Settings) -> None:
+    await query.answer()
+    if not isinstance(query.message, Message):
+        return
+    tg_id = query.from_user.id
+    await db.ensure_user(tg_id, query.from_user.username)
+    user = await db.get_user(tg_id)
+    if user['channel_sub_reward_claimed']:
+        text = '🔑 Вы уже получили подарок за подписку. Ваши ключи и ранг: /profile.'
+    else:
+        if settings.channel_id is None:
+            await query.message.answer('⏳ Проверка подписки временно недоступна. Попробуйте позже.')
+            return
+        try:
+            member = await bot.get_chat_member(chat_id=settings.channel_id, user_id=tg_id)
+        except TelegramAPIError as error:
+            logging.getLogger(__name__).warning('Subscription verification deferred: %s', type(error).__name__)
+            await query.message.answer('⏳ Не удалось проверить подписку. Попробуйте ещё раз чуть позже.',
+                reply_markup=keyboard([[button('✅ Проверить ещё раз', 'claim_sub_key')]]))
+            return
+        subscribed = member.status in ('creator', 'administrator', 'member') or (
+            member.status == 'restricted' and member.is_member)
+        if not subscribed:
+            channel = settings.channel_id if isinstance(settings.channel_id, str) and settings.channel_id.startswith('@') else None
+            if channel is None:
+                try:
+                    chat = await bot.get_chat(settings.channel_id)
+                    channel = '@' + chat.username if chat.username else None
+                    link = 'https://t.me/' + chat.username if chat.username else chat.invite_link
+                except TelegramAPIError:
+                    link = None
+            else:
+                link = 'https://t.me/' + channel[1:]
+            rows = [[InlineKeyboardButton(text='📢 Перейти в канал', url=link)]] if link else []
+            rows.append([button('✅ Я подписался, проверить!', 'claim_sub_key')])
+            await query.message.answer(f'📢 Подпишитесь на наш канал {channel or "NovelPulse"}, '
+                'чтобы не пропускать новые аудио-главы, а затем нажмите кнопку ниже 👇', reply_markup=keyboard(rows))
+            return
+        claimed = await db.claim_channel_subscription_reward(tg_id)
+        text = ('🎉 Подписка подтверждена! Вам начислен +1 🔑 бесплатный ключ к любой платной главе и +25 XP!'
+            if claimed else '🔑 Вы уже получили подарок за подписку. Ваши ключи и ранг: /profile.')
+    account = await db.get_user(tg_id)
+    chapter = await db.latest_locked_paywall(tg_id) if account['free_unlock_credits'] > 0 else None
+    rows = [[button('🔑 Открыть главу бонусным ключом', f"credit:{chapter['id']}")]] if chapter else []
+    rows.append([button('📖 Каталог новелл', 'catalog')])
+    await query.message.answer(text, reply_markup=keyboard(rows))
+    await notify_levelups(bot, db, tg_id)
 
 
 async def daily_gift(query: CallbackQuery, db: Database, bot: Bot) -> None:
@@ -263,7 +318,7 @@ async def profile(message: Message, bot: Bot, db: Database) -> None:
     await notify_levelups(bot,db,message.from_user.id)
     user=await db.get_user(message.from_user.id)
     await message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
-        [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+        subscription_reward_rows(user) + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
 
 
 async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None:
@@ -273,7 +328,7 @@ async def profile_callback(query: CallbackQuery, bot: Bot, db: Database) -> None
     await notify_levelups(bot,db,query.from_user.id)
     user=await db.get_user(query.from_user.id)
     await query.message.answer(status_window(user),parse_mode=None,reply_markup=keyboard(
-        [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
+        subscription_reward_rows(user) + [[button(label,data)] for label,data in vip_options(user)] + [[button('📖 Каталог новелл','catalog')]]))
 
 
 async def catalog(message: Message, bot: Bot, db: Database) -> None:
@@ -385,6 +440,7 @@ def create_router() -> Router:
     router.callback_query.register(vip, F.data == "vip")
     router.callback_query.register(referral, F.data == "referral")
     router.callback_query.register(daily_gift, F.data == "daily_gift")
+    router.callback_query.register(claim_sub_key, F.data == 'claim_sub_key')
     router.callback_query.register(profile_callback, F.data == 'profile')
     router.callback_query.register(listen, F.data.regexp(r'^listen:[1-9][0-9]{0,17}$'))
     router.callback_query.register(credit_unlock, F.data.regexp(r"^credit:[1-9][0-9]{0,17}$"))

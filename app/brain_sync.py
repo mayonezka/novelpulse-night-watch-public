@@ -42,6 +42,7 @@ STAGES = (
     '23. Аудиоглавы по запросу с проверкой доступа, подкаст в Telegram, HTML5-аудиопревью без локальных MP3.',
     '24. Ранги F→S, XP за уникальные события, VIP E-ранга за 9 Stars, страницы глав с аудио и JSON-LD.',
     '25. IndexNow: проверка публичного ключа, пакетная подача портала после деплоя, утренний аудит и правило Flash/Argon.',
+    '26. Одноразовый ключ и +25 XP за проверенную подписку на канал; атомарная награда и синхронизация PC/Cloud.',
 )
 
 
@@ -73,7 +74,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -119,7 +120,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'DmitryNeural + SvetlanaNeural, karaoke, Solo-Leveling HUD, Zero-402 art, MAX_YOUTUBE_UPLOADS_PER_24H=4.',
         '5. /brain_sync и /ceo_brief доступны только ADMIN_IDS. Не публиковать .env, токены, ID читателей или незашифрованную кассу.',
         '6. Стрик считается по UTC. Третий последовательный день даёт один ключ; повторное нажатие не даёт награду.', '',
-        'РЕАЛИЗОВАННЫЕ ЭТАПЫ 1–25 (проверяй live-результаты по журналам соответствующего этапа)', *STAGES, '',
+        f'РЕАЛИЗОВАННЫЕ ЭТАПЫ 1–{len(STAGES)} (проверяй live-результаты по журналам соответствующего этапа)', *STAGES, '',
         'ПУБЛИЧНЫЕ ТОЧКИ ВХОДА',
         'Бот: https://t.me/NovelPulseBot · Канал: https://t.me/novelpulse_litrpg',
         'Портал: https://mayonezka.github.io/novelpulse-library/', '',
@@ -131,6 +132,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 22: ' + state.get('stage22_verification', 'см. data/stage22_full_tests.log и live-отчёт; ещё не зафиксированы.'), '',
         'Проверки Stage 24: ' + state.get('stage24_verification','ещё не зафиксированы; см. data/stage24_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 25: ' + state.get('stage25_verification','ещё не зафиксированы; см. data/stage25_audit.json и live-отчёт.'), '',
+        'Проверки Stage 26: ' + state.get('stage26_verification','ещё не зафиксированы; см. data/stage26_full_tests.log и live-отчёт.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)
     return text

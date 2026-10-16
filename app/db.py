@@ -287,6 +287,17 @@ MIGRATIONS = (
     );
     DROP TRIGGER IF EXISTS cashier_users_update;
     """,
+    """
+    CREATE TABLE xp_events_stage26 (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap','subscription')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    INSERT INTO xp_events_stage26 SELECT tg_id,event_key,kind,amount FROM xp_events;
+    DROP TABLE xp_events;
+    ALTER TABLE xp_events_stage26 RENAME TO xp_events;
+    DROP TRIGGER IF EXISTS cashier_users_update;
+    """,
 )
 
 
@@ -334,6 +345,11 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
+                if index == 18:
+                    columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
+                    if 'channel_sub_reward_claimed' not in columns:
+                        await self.connection.execute('ALTER TABLE users ADD COLUMN channel_sub_reward_claimed '
+                            'INTEGER NOT NULL DEFAULT 0 CHECK(channel_sub_reward_claimed IN (0,1))')
                 if index == 17:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     for name, definition in (
@@ -405,6 +421,33 @@ class Database:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
+
+    @durable_write
+    async def claim_channel_subscription_reward(self, tg_id: int) -> bool:
+        """Caller verifies Telegram membership first; reward and XP commit together once."""
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                cursor = await self.connection.execute('UPDATE users SET channel_sub_reward_claimed=1, '
+                    'free_unlock_credits=free_unlock_credits+1 WHERE tg_id=? AND channel_sub_reward_claimed=0', (tg_id,))
+                claimed = cursor.rowcount == 1
+                if claimed:
+                    await self._award_xp(tg_id, 'channel_subscription', 'subscription')
+                await self.connection.commit()
+                return claimed
+            except BaseException:
+                await self.connection.rollback()
+                raise
+
+    async def latest_locked_paywall(self, tg_id: int) -> dict | None:
+        async with self._lock:
+            rows = await self._all('SELECT chapter_id FROM paywall_views WHERE tg_id=? '
+                'ORDER BY julianday(viewed_at) DESC,id DESC LIMIT 50', (tg_id,))
+        for row in rows:
+            chapter = await self.get_chapter(row['chapter_id'])
+            if chapter and not await self.can_read(tg_id, chapter):
+                return chapter
+        return None
 
     @durable_write
     async def claim_daily_gift(self, tg_id: int, *, now: datetime | None = None) -> dict:
