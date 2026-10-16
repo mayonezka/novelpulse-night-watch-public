@@ -23,6 +23,59 @@ STORY_OPTIONS=(
 )
 
 
+async def publish_featured_review_post(db,bot,channel_id,series_id=5):
+    """Feature consented reviews; editorial examples never count as reader ratings."""
+    series=await db.get_series(series_id)
+    if not series:raise ValueError('Новелла не найдена')
+    featured=await db.get_featured_reviews(series_id,limit=1)
+    review=featured[0] if featured else None
+    demonstration=review is None
+    username=(await bot.get_me()).username
+    link=bot_link(username,series_id)
+    if review:
+        name='@'+review['username'] if review.get('username') else 'Читатель без username'
+        text=(f'💬 РЕЦЕНЗИЯ ЧИТАТЕЛЯ · «{series["title"][:220]}»\n\n'
+            f'{"⭐️"*review["rating"]} {review["rating"]:.1f}/5.0 | Читатель: {name} (Ранг: {review["player_rank"]})\n\n')
+        if review['review_text']:text+='«'+review['review_text']+'»\n\n'
+        if review['favorite_quote']:text+='Любимая цитата: «'+review['favorite_quote']+'»\n\n'
+    else:
+        text=(f'💬 ПРИМЕР ОТЗЫВА · «{series["title"][:220]}»\n\n'
+            '🧪 Демонстрационный текст редакции NovelPulse. Это пример формы, а не отзыв реального читателя.\n\n'
+            '⭐️⭐️⭐️⭐️⭐️ 5.0/5.0 — пример оценки\n\n'
+            '«Невероятный поворот в 4-й главе! Не ожидал, что законы физики так круто лягут на магию!»\n\n'
+            'Прочитали новеллу? Оставьте собственный отзыв через /review в боте и получите +15 XP. '
+            'Он может стать следующей рецензией канала, если вы разрешите публикацию.\n\n')
+    text+='👉 Читать новеллу онлайн бесплатно: '+link
+    key=f'featured_review_post:{channel_id}:{series_id}:'+ (str(review['id']) if review else 'editorial-example-v1')
+    async with db._lock:
+        await db.connection.execute('BEGIN IMMEDIATE')
+        try:
+            previous=await db._one('SELECT value FROM app_state WHERE key=?',(key,))
+            prior=json.loads(previous['value']) if previous else {}
+            if prior.get('state')=='sent':
+                await db.connection.commit()
+                return prior
+            if prior.get('state') in ('sending','uncertain'):
+                raise RuntimeError('Доставка рецензии требует сверки; повторная отправка исключена')
+            await db.connection.execute('INSERT INTO app_state(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                (key,json.dumps({'state':'sending','demonstration':demonstration})))
+            await db.connection.commit()
+        except BaseException:
+            await db.connection.rollback();raise
+    try:
+        message=await bot.send_message(channel_id,text,parse_mode=None,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text='📖 Читать и оценить в боте',url=link)]]))
+    except BaseException as error:
+        state='failed' if isinstance(error,TelegramAPIError) and not isinstance(error,TelegramNetworkError) else 'uncertain'
+        await db.set_state(key,json.dumps({'state':state,'error':type(error).__name__,'demonstration':demonstration}))
+        raise
+    receipt={'state':'sent','message_id':message.message_id,'series_id':series_id,
+        'review_id':review['id'] if review else None,'demonstration':demonstration}
+    await db.set_state(key,json.dumps(receipt))
+    return receipt
+
+
 async def publish_podcast_chapter_drop(db, bot, channel_id, series_id=5, chapter_num=1):
     """A replay-safe public free chapter; an ambiguous send is never retried blindly."""
     from app.audiobook import render_chapter_audio, audio_title

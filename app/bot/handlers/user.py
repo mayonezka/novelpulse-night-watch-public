@@ -18,6 +18,7 @@ from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
 from app.gamification import notify_levelups, status_window
 from app.notifications import notify_admins
 from app.quiz import question_card,result_card,recommended_series,referral_text
+from app.reviews import rating_line,review_button,register_handlers as register_reviews
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
 PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
@@ -123,7 +124,9 @@ async def show_series(bot: Bot, chat_id: int, series_id: int, db: Database) -> N
         return
     progress=await db.library_progress(chat_id,series_id)
     summary=progress_bar(progress[0]['read_count'],progress[0]['total_chapters']) if progress else ''
-    await send_text(bot, chat_id, f"📚 {series['title']}\n{series['genre_title']}\n{summary}\n\n{series['description']}")
+    average,count=await db.get_series_rating_stats(series_id)
+    await send_text(bot, chat_id, f"📚 {series['title']}\n{series['genre_title']}\n{summary}\n"
+        f"{rating_line(average,count)}\n\n{series['description']}",keyboard([[review_button(series_id)]]))
     for offset in range(0, len(chapters), 50):
         rows = []
         for chapter in chapters[offset:offset + 50]:
@@ -159,9 +162,12 @@ async def show_chapter(bot: Bot, chat_id: int, tg_id: int, chapter_id: int, db: 
         if navigation:
             rows.append(navigation)
         if page == len(pages) - 1:
+            average,count=await db.get_series_rating_stats(chapter['series_id'])
+            text+='\n\n'+rating_line(average,count)
             following = await db.next_chapter(chapter["series_id"], chapter["chapter_num"])
             if following:
                 rows.append([button("➡️ Следующая глава", f"chapter:{following['id']}")])
+            rows.append([review_button(chapter['series_id'])])
         rows.append([button('🎧 Слушать аудиокнигу', f'listen:{chapter_id}')])
         rows.append([button("🔙 Назад к каталогу", "catalog")])
         markup = keyboard(rows)
@@ -672,4 +678,5 @@ def create_router() -> Router:
     router.callback_query.register(peek, F.data.regexp(r'^peek:[1-9][0-9]{0,17}$'))
     router.callback_query.register(navigate, F.data.regexp(
         r"^(catalog|genre:(?:litrpg|cultivation|isekai|science_magic|taming|comedy_isekai|audio)|(?:series|chapter|read):[1-9][0-9]{0,17}|page:[1-9][0-9]{0,17}:[0-9]{1,6})$"))
+    register_reviews(router,private)
     return router

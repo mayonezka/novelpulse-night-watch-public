@@ -6,7 +6,8 @@ import json
 from datetime import datetime, timezone
 
 TABLES = ('users', 'payment_orders', 'vip_orders', 'purchases', 'reading_progress',
-          'reader_notifications', 'paywall_views', 'admin_alerts', 'processed_updates', 'xp_events', 'rank_awards')
+          'reader_notifications', 'paywall_views', 'admin_alerts', 'processed_updates', 'xp_events', 'rank_awards',
+          'reviews','review_drafts')
 
 
 def _fernet(key):
@@ -80,9 +81,11 @@ async def dump_cashier(db, bot_id: int) -> dict:
 
 async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_anchor=False) -> dict:
     """Absolute balances/VIP state are merged once under an exclusive polling lease."""
+    legacy_reviews=set()
     if isinstance(payload.get('tables'),dict):
         missing=set(TABLES)-set(payload['tables'])
-        if missing and missing <= {'xp_events','rank_awards'}:
+        if missing and missing <= {'xp_events','rank_awards','reviews','review_drafts'}:
+            legacy_reviews=missing & {'reviews','review_drafts'}
             payload={**payload,'tables':{**payload['tables'],**{name:[] for name in missing}}}
     if (payload.get('version') != 1 or payload.get('bot_id') != bot_id or
             type(payload.get('revision')) is not int or payload['revision'] < 0 or
@@ -92,6 +95,10 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
     async with db._lock:
         await db.connection.execute('BEGIN IMMEDIATE')
         try:
+            if not restore_durable_anchor:
+                for table in legacy_reviews:
+                    if await db._one(f'SELECT 1 AS present FROM {table} LIMIT 1'):
+                        raise ValueError('Legacy cashier checkpoint cannot overwrite review state')
             local = (await db._one('SELECT revision FROM cashier_clock WHERE id=1'))['revision']
             if restore_durable_anchor:
                 # Only a previously authenticated GitHub-committed local anchor may use
@@ -155,6 +162,13 @@ async def merge_cashier(db, payload: dict, bot_id: int, *, restore_durable_ancho
                         f"VALUES ({','.join('?' for _ in columns)}) ON CONFLICT({','.join(pk)}) DO UPDATE SET " +
                         ','.join(f'{c}=excluded.{c}' for c in changes), tuple(row[c] for c in columns))
                     counts[table] += 1
+                if table == 'review_drafts' and table not in legacy_reviews:
+                    # A consumed/cancelled cloud form must not reappear on PC reclaim.
+                    for local_draft in await db._all('SELECT tg_id FROM review_drafts'):
+                        if (local_draft['tg_id'],) not in identities:
+                            await db.connection.execute('DELETE FROM review_drafts WHERE tg_id=?',
+                                (local_draft['tg_id'],))
+                            counts[table] += 1
             await db.connection.execute('UPDATE cashier_clock SET revision=? WHERE id=1', (payload['revision'],))
             await db.connection.commit()
         except BaseException:

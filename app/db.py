@@ -351,6 +351,35 @@ MIGRATIONS = (
     ALTER TABLE xp_events_stage32 RENAME TO xp_events;
     DROP TRIGGER IF EXISTS cashier_users_update;
     """,
+    """
+    CREATE TABLE IF NOT EXISTS reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        series_id INTEGER NOT NULL REFERENCES series(id),
+        rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+        review_text TEXT NOT NULL DEFAULT '' CHECK(length(review_text)<=500),
+        favorite_quote TEXT NOT NULL DEFAULT '' CHECK(length(favorite_quote)<=500),
+        is_featured INTEGER NOT NULL DEFAULT 0 CHECK(is_featured IN (0,1)),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        UNIQUE(tg_id,series_id)
+    );
+    CREATE INDEX IF NOT EXISTS reviews_series ON reviews(series_id,is_featured,created_at);
+    CREATE TABLE IF NOT EXISTS review_drafts (
+        tg_id INTEGER PRIMARY KEY REFERENCES users(tg_id),
+        series_id INTEGER NOT NULL REFERENCES series(id),
+        token TEXT NOT NULL,
+        rating INTEGER CHECK(rating BETWEEN 1 AND 5),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE TABLE xp_events_stage36 (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id), event_key TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('read','checkin','referral','purchase','bootstrap','subscription','quiz','wuf','story','review')),
+        amount INTEGER NOT NULL CHECK(amount>=0), PRIMARY KEY(tg_id,event_key)
+    );
+    INSERT INTO xp_events_stage36 SELECT tg_id,event_key,kind,amount FROM xp_events;
+    DROP TABLE xp_events;
+    ALTER TABLE xp_events_stage36 RENAME TO xp_events;
+    """,
 )
 
 
@@ -420,7 +449,7 @@ class Database:
             if version > len(MIGRATIONS):
                 raise RuntimeError("Database schema is newer than this application")
             for index in range(version, len(MIGRATIONS)):
-                if index == len(MIGRATIONS) - 1:
+                if index == 23:
                     columns = {row['name'] for row in await self._all('PRAGMA table_info(users)')}
                     if 'story_reward_claimed' not in columns:
                         await self.connection.execute('ALTER TABLE users ADD COLUMN story_reward_claimed '
@@ -553,6 +582,83 @@ class Database:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
+
+    @durable_write
+    async def begin_review(self, tg_id: int, series_id: int) -> dict:
+        token=secrets.token_hex(4)
+        async with self._lock:
+            if not await self._one('SELECT id FROM chapters WHERE series_id=? AND is_published=1 LIMIT 1',(series_id,)):
+                raise ValueError('Эта новелла пока недоступна.')
+            await self.connection.execute('INSERT INTO review_drafts(tg_id,series_id,token) VALUES (?,?,?) '
+                "ON CONFLICT(tg_id) DO UPDATE SET series_id=excluded.series_id,token=excluded.token,rating=NULL,created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                (tg_id,series_id,token))
+        return {'series_id':series_id,'token':token}
+
+    async def get_review_draft(self, tg_id: int) -> dict | None:
+        async with self._lock:
+            return await self._one("SELECT * FROM review_drafts WHERE tg_id=? AND julianday(created_at)>julianday('now')-1",(tg_id,))
+
+    @durable_write
+    async def rate_review_draft(self,tg_id: int,series_id: int,token: str,rating: int) -> bool:
+        if type(rating) is not int or not 1 <= rating <= 5:
+            raise ValueError('Выберите оценку от 1 до 5.')
+        async with self._lock:
+            cursor=await self.connection.execute("UPDATE review_drafts SET rating=? WHERE tg_id=? AND series_id=? AND token=? AND julianday(created_at)>julianday('now')-1",
+                (rating,tg_id,series_id,token))
+            return cursor.rowcount==1
+
+    @durable_write
+    async def cancel_review(self,tg_id: int,token: str | None=None) -> None:
+        async with self._lock:
+            await self.connection.execute('DELETE FROM review_drafts WHERE tg_id=? AND (? IS NULL OR token=?)',(tg_id,token,token))
+
+    @durable_write
+    async def add_or_update_review(self,tg_id: int,series_id: int,rating: int,
+                                   review_text: str='',favorite_quote: str='',*,draft_token: str | None=None) -> dict:
+        if type(rating) is not int or not 1 <= rating <= 5:
+            raise ValueError('Выберите оценку от 1 до 5.')
+        if not isinstance(review_text,str) or not isinstance(favorite_quote,str) or max(len(review_text),len(favorite_quote))>500:
+            raise ValueError('Отзыв и цитата должны быть не длиннее 500 символов.')
+        review_text,favorite_quote=review_text.strip(),favorite_quote.strip()
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                if draft_token is not None:
+                    draft=await self._one("SELECT * FROM review_drafts WHERE tg_id=? AND series_id=? AND token=? AND rating=? AND julianday(created_at)>julianday('now')-1",
+                        (tg_id,series_id,draft_token,rating))
+                    if not draft:raise ValueError('Эта форма отзыва устарела. Начните заново через /review.')
+                if not await self._one('SELECT id FROM chapters WHERE series_id=? AND is_published=1 LIMIT 1',(series_id,)):
+                    raise ValueError('Эта новелла пока недоступна.')
+                await self.connection.execute('INSERT INTO reviews(tg_id,series_id,rating,review_text,favorite_quote) VALUES (?,?,?,?,?) '
+                    'ON CONFLICT(tg_id,series_id) DO UPDATE SET rating=excluded.rating,review_text=excluded.review_text,'
+                    'favorite_quote=excluded.favorite_quote,is_featured=CASE WHEN reviews.rating=excluded.rating '
+                    'AND reviews.review_text=excluded.review_text AND reviews.favorite_quote=excluded.favorite_quote '
+                    'THEN reviews.is_featured ELSE 0 END',(tg_id,series_id,rating,review_text,favorite_quote))
+                awarded=await self._award_xp(tg_id,f'review:{series_id}','review')
+                if draft_token is not None:
+                    await self.connection.execute('DELETE FROM review_drafts WHERE tg_id=? AND token=?',(tg_id,draft_token))
+                review=await self._one('SELECT * FROM reviews WHERE tg_id=? AND series_id=?',(tg_id,series_id))
+                await self.connection.commit()
+                return {**review,'xp_awarded':awarded}
+            except BaseException:
+                await self.connection.rollback();raise
+
+    async def get_series_rating_stats(self,series_id: int) -> tuple[float,int]:
+        async with self._lock:
+            row=await self._one('SELECT COALESCE(AVG(rating),0) average,COUNT(*) count FROM reviews WHERE series_id=?',(series_id,))
+            return round(float(row['average']),1),row['count']
+
+    async def get_featured_reviews(self,series_id: int,limit: int=3) -> list[dict]:
+        if type(limit) is not int or not 1 <= limit <= 20:raise ValueError('Invalid review limit')
+        async with self._lock:
+            return await self._all("SELECT r.*,u.username,u.player_rank FROM reviews r JOIN users u ON u.tg_id=r.tg_id "
+                "WHERE r.series_id=? AND r.is_featured=1 AND (r.review_text<>'' OR r.favorite_quote<>'') ORDER BY r.created_at DESC,r.id DESC LIMIT ?",(series_id,limit))
+
+    @durable_write
+    async def feature_own_review(self,tg_id: int,review_id: int) -> bool:
+        async with self._lock:
+            cursor=await self.connection.execute("UPDATE reviews SET is_featured=1 WHERE id=? AND tg_id=? AND (review_text<>'' OR favorite_quote<>'')",(review_id,tg_id))
+            return cursor.rowcount==1
 
     @durable_write
     async def begin_quiz(self, tg_id: int) -> dict:

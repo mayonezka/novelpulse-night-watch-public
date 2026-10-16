@@ -93,6 +93,7 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                 BotCommand(command="catalog", description="Каталог новелл"),
                 BotCommand(command="profile", description="Мой Ранг в Системе"),
                 BotCommand(command="quiz", description="Узнать свой скрытый класс"),
+                BotCommand(command="review", description="Оценить новеллу и оставить отзыв"),
                 BotCommand(command="myid", description="Узнать свой Telegram ID"),
                 BotCommand(command="terms", description="Условия покупки"),
                 BotCommand(command="paysupport", description="Помощь с оплатой"),

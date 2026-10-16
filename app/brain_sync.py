@@ -52,6 +52,7 @@ STAGES = (
     '33. Главы 7–10 для серий 7–8, импорт девятой записи каталога, Chapter SEO, IndexNow и обновление навигатора.',
     '34. Win32 shutdown/suspend handover, PC heartbeat 20 с / lease 45 с и Night-Watch ETag polling 6 с.',
     '35. Каталог 10 новелл / 85 глав, углубление Series 9, два Trending-импорта, 96 HTML-страниц, IndexNow, навигатор и Fernet-синхронизация.',
+    '36. Реальные оценки и отзывы, +15 XP однократно за книгу, разрешение на публикацию отзыва, зашифрованные черновики и облачная синхронизация.',
 )
 
 
@@ -83,7 +84,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -152,6 +153,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 32: ' + state.get('stage32_verification','ещё не зафиксированы; см. data/stage32_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 34: ' + state.get('stage34_verification','ещё не зафиксированы; см. data/stage34_full_tests.log и live-отчёт.'), '',
         'Проверки Stage 35: ' + state.get('stage35_verification','ещё не зафиксированы; см. data/stage35_live_report.json.'), '',
+        'Проверки Stage 36: ' + state.get('stage36_verification','ещё не зафиксированы; см. data/stage36_live_report.json.'), '',
     ])
     await asyncio.to_thread(_atomic_write, Path(output_path) if output_path is not None else HANDOFF_PATH, text)
     return text
