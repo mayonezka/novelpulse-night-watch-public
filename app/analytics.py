@@ -8,6 +8,7 @@ STAGES = (('Запуск бота',('bot_start',)),('Глава 1',('open_chapte
           ('Бесплатный ключ / WUF',('use_free_key',)),
           ('Кнопка оплаты / счёт',('click_pay_button','invoice_sent')),
           ('Оплата Stars',('payment_success',)))
+PARENTS=(None,0,1,2,3,3,5)
 
 
 def acquisition_source(payload: str | None) -> str:
@@ -29,12 +30,15 @@ def summarize(rows: list[dict]) -> dict:
         cohorts[row['event_name']].add(row['tg_id'])
         if row['event_name']=='bot_start' and row['tg_id'] not in first:
             first[row['tg_id']]=source_label(row['source'])
-    stages=[];previous=None
-    for label,events in STAGES:
+    stages=[];sets=[]
+    for index,(label,events) in enumerate(STAGES):
         current=set().union(*(cohorts[e] for e in events))
+        parent=PARENTS[index]
+        previous=sets[parent] if parent is not None else None
         conversion=round(100*len(current & previous)/len(previous),1) if previous else None
-        stages.append({'label':label,'users':len(current),'previous_step_conversion':conversion})
-        previous=current
+        stages.append({'label':label,'users':len(current),'previous_step_conversion':conversion,
+            'parent_step':parent+1 if parent is not None else None})
+        sets.append(current)
     sources={}
     for source in first.values():sources[source]=sources.get(source,0)+1
     return {'stages':stages,'events':{k:len(v) for k,v in cohorts.items()},
@@ -47,11 +51,12 @@ def funnel_text(summary: dict, *, compact=False) -> str:
     for index,stage in enumerate(summary['stages'],1):
         value=stage['previous_step_conversion']
         conversion='—' if value is None else f'{value:.1f}%'
-        lines.append(f"{index}. {stage['label']}: {stage['users']} · {conversion}")
+        parent=f" от шага {stage['parent_step']}" if stage['parent_step'] is not None else ''
+        lines.append(f"{index}. {stage['label']}: {stage['users']} · {conversion}{parent}")
     if not compact:
         lines.extend([f"Счёт подтверждён отправкой: {summary['events']['invoice_sent']} чит.",
-            '', 'Процент = доля читателей предыдущего шага, замеченных и на текущем.',
-            'Ключи и Stars — разные ветки: это пересечение, а не обязательный путь к оплате.',
+            '', 'Процент = доля читателей указанного родительского шага, замеченных и на текущем.',
+            'Ключи и Stars — разные ветки от Paywall: шаги 5 и 6 считаются от шага 4, оплата от шага 6.',
             'Источники первого /start:'])
         lines.extend(f'• {source}: {count}' for source,count in summary['sources'])
         if not summary['sources']:lines.append('• Пока нет событий')
