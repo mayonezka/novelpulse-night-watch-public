@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import html
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -227,10 +228,16 @@ async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> No
         return
     while True:
         if (Path(db.path).resolve().parent/'autopilot.pause').exists():
+            await db.set_state('autopilot_pacer_status', json.dumps({'state': 'paused', 'pid': os.getpid(),
+                'checked_at': datetime.now(timezone.utc).isoformat()}))
             await asyncio.sleep(5)
             continue
         from app.scheduling import upload_schedule
         schedule = await upload_schedule(db, settings)
+        await db.set_state('autopilot_pacer_status', json.dumps({'state': 'running' if schedule['due'] else 'armed',
+            'pid': os.getpid(), 'checked_at': datetime.now(timezone.utc).isoformat(),
+            'next_upload_at': schedule['next_upload_at'], 'cooldown_until': schedule['cooldown_until'],
+            'max_check_interval_seconds': 60}))
         if not schedule['due']:
             # One catch-up publication, not a burst for every missed overnight slot.
             # Re-read cooldown/queue every minute; resume at expiry, even after edits.

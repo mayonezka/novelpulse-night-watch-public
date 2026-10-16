@@ -12,6 +12,7 @@ from dotenv import set_key
 from app.config import PipelineSettings, Settings
 from app.db import Database
 from app.web_portal import generate_web_portal
+from app.crawler_indexing import indexnow_key, write_indexnow_key, submit_portal_indexnow
 
 
 def matches_public_text(remote: bytes, local: Path) -> bool:
@@ -23,18 +24,24 @@ def message_contains_url(message, url: str) -> bool:
     return url in (message.text or '') or any(getattr(entity, 'url', None) == url for entity in (message.entities or []))
 
 
-def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = (), chapter_pages=()) -> dict[str, str]:
+def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = (), chapter_pages=(), verification_key='') -> dict[str, str]:
     root = directory.resolve()
     for name in chapter_pages:
         match=re.fullmatch(r'series_([1-9][0-9]*)_ch_([1-9][0-9]*)\.html',name)
         if not match or int(match[1]) not in series_ids:raise ValueError('Invalid public chapter filename')
     names = ['index.html', *[f'series_{i}.html' for i in series_ids], *chapter_pages, 'sitemap.xml', 'robots.txt']
+    if verification_key:
+        if not re.fullmatch('[0-9a-f]{32}', verification_key):
+            raise ValueError('Invalid IndexNow key')
+        names.append(verification_key + '.txt')
     files = {}
     for name in names:
         path = root / name
         if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file():
             raise ValueError('Public deployment requires regular files within docs/')
         content = path.read_text(encoding='utf-8')
+        if name == verification_key + '.txt' and content != verification_key:
+            raise ValueError('IndexNow verification file content mismatch')
         if (any(secret and secret in content for secret in secrets)
                 or re.search(r'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|[0-9]{8,12}:[A-Za-z0-9_-]{30,})', content)
                 or '-----BEGIN PRIVATE KEY-----' in content):
@@ -51,12 +58,14 @@ async def github_request(client, method, path, *, expected=(200,), **kwargs):
 
 
 async def deploy_github_pages(db: Database, settings: Settings, username: str, channel: str,
-                               token: str, *, client=None, directory='docs') -> dict:
+                               token: str, *, client=None, directory='docs', indexing_client=None,
+                               indexnow_wait_seconds=180) -> dict:
     if client is None:
         async with httpx.AsyncClient(timeout=30, headers={
             'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
             'X-GitHub-Api-Version': '2026-03-10', 'User-Agent': 'NovelPulse-PublicLibrary'}) as owned:
-            return await deploy_github_pages(db, settings, username, channel, token, client=owned, directory=directory)
+            return await deploy_github_pages(db, settings, username, channel, token, client=owned,
+                directory=directory, indexing_client=indexing_client, indexnow_wait_seconds=indexnow_wait_seconds)
     ids = [s['id'] for s in await db.list_series()]
     chapter_pages=[f"series_{sid}_ch_{c['chapter_num']}.html" for sid in ids for c in await db.list_chapters(sid)]
     allowed_names={'index.html','sitemap.xml','robots.txt',*[f'series_{sid}.html' for sid in ids],*chapter_pages}
@@ -72,6 +81,9 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     login = user['login']
     if not re.fullmatch(r'[A-Za-z0-9-]+', login):
         raise ValueError('Invalid GitHub owner')
+    # The dedicated repository name is fixed; permit only its derived verification filename.
+    verification_key = indexnow_key(f'https://{login.lower()}.github.io/novelpulse-library/')
+    allowed_names.add(verification_key + '.txt')
     state = json.loads(await db.get_state('public_web_deployment') or '{}')
     if state.get('provider') == 'github_pages':
         full_name = state['repository']
@@ -91,8 +103,12 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     if repo.get('private') or not repo.get('permissions', {}).get('admin'):
         raise ValueError('Dedicated public repository with admin access is required')
     base_url = f'https://{login.lower()}.github.io/{repo["name"]}/'
+    if repo['name'] != 'novelpulse-library':
+        raise ValueError('Expected the dedicated novelpulse-library repository')
     await generate_web_portal(db, username, output_dir=directory, base_url=base_url, channel_id=channel)
-    files = public_static_files(Path(directory), ids, secrets=secret_values,chapter_pages=chapter_pages)
+    write_indexnow_key(directory, base_url)
+    files = public_static_files(Path(directory), ids, secrets=secret_values,chapter_pages=chapter_pages,
+                               verification_key=verification_key)
     branch = repo['default_branch']
     if len(files)>20:
         await publish_static_commit(client,full_name,branch,files)
@@ -122,6 +138,13 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
         raise ValueError('Public repository file audit failed')
     state.update(base_url=base_url, branch=branch, status='building', files=remote_files,
                  digest=hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest())
+    await db.set_state('public_web_deployment', json.dumps(state))
+    # This public, unauthenticated client is separate from the GitHub credentialed transport.
+    try:
+        state['indexnow'] = await submit_portal_indexnow(db, directory, base_url,
+            client=indexing_client, wait_seconds=indexnow_wait_seconds)
+    except (httpx.HTTPError, OSError, ValueError) as error:
+        state['indexnow'] = {'status': 'failed', 'error': type(error).__name__}
     await db.set_state('public_web_deployment', json.dumps(state))
     return state
 
