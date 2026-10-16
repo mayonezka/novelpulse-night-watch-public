@@ -45,7 +45,7 @@ def escape(value) -> str:
 
 
 def shell(title: str, description: str, body: str, *, canonical: str, channel_url: str,
-          schema: dict | None = None, sticky: str = '', rss: str = '') -> str:
+          schema: dict | None = None, sticky: str = '', rss: str = '', verification: str = '') -> str:
     metadata = ''
     if canonical:
         metadata = f'<link rel="canonical" href="{escape(canonical)}"><meta property="og:url" content="{escape(canonical)}">'
@@ -53,13 +53,14 @@ def shell(title: str, description: str, body: str, *, canonical: str, channel_ur
     if schema:
         # Prevent an imported </script> string from breaking out of JSON-LD.
         structured = '<script type="application/ld+json">' + json.dumps(schema, ensure_ascii=False).replace('<', '\\u003c') + '</script>'
+    verification_meta = f'<meta name="google-site-verification" content="{escape(verification.strip())}">' if verification.strip() else ''
     channel = f'<a href="{escape(channel_url)}">Telegram-канал ↗</a>' if channel_url else ''
     return f'''<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><meta name="description" content="{escape(description[:300])}">
 <meta property="og:title" content="{escape(title)}"><meta property="og:description" content="{escape(description[:300])}">
 <meta property="og:type" content="{'book' if schema else 'website'}"><meta property="og:locale" content="ru_RU">
-<meta name="theme-color" content="#0a1513">{metadata}{structured}{rss}<style>{CSS}</style></head>
+<meta name="theme-color" content="#0a1513">{metadata}{structured}{rss}{verification_meta}<link rel="stylesheet" href="styles.css"></head>
 <body><header><a class="brand" href="index.html">Novel<span>Pulse</span></a><nav><a href="index.html">Библиотека</a>{channel}</nav></header>
 <main>{body}</main><footer>NovelPulse · Русские переводы веб-новелл. Первые главы бесплатно.<br>
 Покупки глав бессрочны. VIP действует 7 дней и стоит 49 Telegram Stars.</footer>{sticky}</body></html>'''
@@ -71,30 +72,24 @@ def chapter_html(chapter: dict) -> str:
 
 
 def audio_preview_html(series, chapters, previews, link):
-    """A small inline MP3 keeps static hosting self-contained and local storage empty."""
-    import base64
-    from app.audiobook import preview_fingerprint
-    preview = previews.get(str(series['id']),{})
-    first = next((c for c in chapters if c['id']==preview.get('chapter_id')),None)
-    encoded = preview.get('audio_base64','')
-    if first is None or preview.get('source_digest')!=preview_fingerprint(first):
+    """Reuse the same validated public RSS enclosure on every page of this book."""
+    from app.podcast_feed import podcast_assets
+    preview = previews.get(str(series['id']), {})
+    filename = f'podcast_{series["id"]}.mp3'
+    if filename not in podcast_assets([{'series': series, 'chapters': chapters}], previews):
         return f'<aside class="audio-preview"><h2>🎧 Слушайте в Telegram</h2><a href="{escape(link)}">Открыть аудиокнигу в боте</a></aside>'
-    try:
-        if not 100<=len(base64.b64decode(encoded,validate=True))<=260_000:
-            raise ValueError('Preview outside size budget')
-    except (ValueError,TypeError):
-        return ''
     return ('<aside class="audio-preview"><h2>🎧 Послушайте начало истории</h2>'
             '<p>Короткий аудиофрагмент · русская нейронная озвучка NovelPulse Audio</p>'
             f'<audio controls preload="none" aria-label="Аудиофрагмент {escape(series["title"])}">'
-            f'<source src="data:audio/mpeg;base64,{encoded}" type="audio/mpeg">'
+            f'<source src="{filename}" type="audio/mpeg">'
             'Ваш браузер не поддерживает аудио. Откройте главу в Telegram.</audio>'
             f'<details><summary>Текст аудиофрагмента</summary><p>{escape(preview.get("transcript",""))}</p></details>'
             f'<a class="cta" href="{escape(link)}">🎧 Слушать полные главы в боте</a></aside>')
 
 
 async def generate_web_portal(db: Database, bot_username: str, *, output_dir: str | Path = 'docs',
-                               base_url: str | None = None, channel_id: str | int | None = None) -> dict:
+                               base_url: str | None = None, channel_id: str | int | None = None,
+                               google_site_verification: str = '') -> dict:
     config = PipelineSettings(_env_file=None, web_base_url=base_url)
     base = config.web_base_url or 'http://localhost:8000/'
     public = config.web_base_url is not None
@@ -105,10 +100,18 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
     search_rows = {s['id']: s for s in await db.searchable_catalog()}
     hubs = json.loads(await db.get_state('seo_hubs') or '[]')
     previews = json.loads(await db.get_state('web_audio_previews') or '{}')
-    chapter_previews=json.loads(await db.get_state('chapter_audio_previews') or '{}')
+    original_full = await db.get_state('original_flagship_version') == '40'
+    search_index = {}
+    def indexed_attributes(row, kind):
+        from bs4 import BeautifulSoup
+        attrs = BeautifulSoup('<i '+search_attributes(row,kind)+'></i>', 'html.parser').i.attrs
+        key = str(len(search_index))
+        search_index[key] = {'search': attrs['data-search'], 'tropes': attrs['data-tropes']}
+        return f'data-filter-item="{kind}" data-search-id="{key}"'
+    (directory/'styles.css').write_text(CSS, encoding='utf-8')
     cards, files, books = [], [], []
     for series in series_list:
-        link = bot_link(bot_username, series['id'])
+        link = f"https://t.me/{bot_username}?start=web_s_{series['id']}"
         filename = f"series_{series['id']}.html"
         published=await db.list_chapters(series['id'])
         chapters = [await db.get_chapter(c['id']) for c in published
@@ -119,15 +122,12 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             chapter=await db.get_chapter(row['id'])
             chapter_name=f"series_{series['id']}_ch_{chapter['chapter_num']}.html"
             chapter_url=urljoin(base,chapter_name)
-            direct=f"https://t.me/{bot_username}?start=ch_{chapter['id']}"
+            direct=f"https://t.me/{bot_username}?start=web_ch_{chapter['id']}"
             title=f"{series['title']} — Глава {chapter['chapter_num']}: {chapter['title']} | Читать и слушать онлайн на русском"
-            preview=chapter_previews.get(str(chapter['id']))
-            if preview:
-                audio=audio_preview_html(series,[chapter],{str(series['id']):preview},direct)
-            else:
-                audio=audio_preview_html(series,chapters,previews,direct)
-                audio=audio.replace('Послушайте начало истории','Аудиознакомство с новеллой')
-            excerpt=chapter['content_text'][:1200]
+            audio=audio_preview_html(series,chapters,previews,direct)
+            full_free = original_full and series['id'] == 1 and chapter['chapter_num'] <= 2
+            excerpt=chapter['content_text'] if full_free else chapter['content_text'][:1200]
+            chapter_description=f"{series['title']} · Глава {chapter['chapter_num']}: {chapter['title']}. {excerpt[:160]}"
             graph={'@context':'https://schema.org','@graph':[
                 {'@type':'Chapter','@id':chapter_url+'#chapter','url':chapter_url,'name':title,
                  'position':chapter['chapter_num'],'inLanguage':'ru','description':excerpt[:250],
@@ -141,25 +141,25 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             body=(f'<div class="hero"><div class="eyebrow"><a href="index.html">Библиотека</a> / '
                   f'<a href="{filename}">{escape(series["title"])}</a></div><h1>Глава {chapter["chapter_num"]}: '
                   f'{escape(chapter["title"])}</h1><p>{escape(series["title"])}</p>{cta}</div>'
-                  f'<article class="reader">{audio}<section class="chapter"><p>{escape(excerpt)}</p>'
-                  '<blockquote>…Система скрывает исход этой сцены. Продолжение уже ждёт в боте.</blockquote>'
+                  f'<article class="reader">{audio}<section class="chapter"><p>{escape(excerpt)}</p>' +
+                  ('' if full_free else '<blockquote>…Система скрывает исход этой сцены. Продолжение уже ждёт в боте.</blockquote>') +
                   f'{cta}<p>🎧 Полная аудиоглава и текст — в Telegram. Первая платная глава: 1 ⭐️; VIP на 24 часа: 19 ⭐️.</p>'
                   '</section></article>')
-            (directory/chapter_name).write_text(shell(title,excerpt[:300],body,canonical=chapter_url if public else '',
+            (directory/chapter_name).write_text(shell(title,chapter_description,body,canonical=chapter_url if public else '',
                 channel_url=channel,schema=graph,sticky=f'<aside class="sticky">{cta}</aside>'),encoding='utf-8')
             files.append(chapter_name)
             chapter_links.append(f'<li><a href="{chapter_name}">Глава {chapter["chapter_num"]}: {escape(chapter["title"])}</a></li>')
         chapter_nav='<section class="links"><h2>Все главы: читать и слушать</h2><ol>'+''.join(chapter_links)+'</ol></section>'
         schema = {'@context': 'https://schema.org', '@type': 'Book', 'name': series['title'],
-                  'inLanguage': 'ru', 'genre': ['ЛитРПГ', 'Веб-новелла'], 'description': series['description'],
+                  'inLanguage': 'ru', 'genre': ['ЛитРПГ', 'Веб-новелла'], 'description': series['description'][:700],
                   'publisher': {'@type': 'Organization', 'name': 'NovelPulse'},
                   'sameAs': [url for url in (series['source_url'], series['telegraph_url']) if url]}
         if public:
             schema['url'] = urljoin(base, filename)
         article = (f'<div class="hero"><div class="eyebrow">Библиотека / ЛитРПГ и новые миры</div>'
-                   f'<h1>{escape(series["title"])}</h1><p>{escape(series["description"])}</p>'
+                   f'<h1>{escape(series["title"])}</h1><p>{escape(complete_excerpt(series["description"],700))}</p>'
                    '<span class="pill">Первые главы бесплатно</span><span class="pill">Перевод на русский</span></div>'
-                   '<article class="reader">' + chapter_nav + audio_preview_html(series,chapters,previews,link) + ''.join(chapter_html(c) for c in chapters) +
+                   '<article class="reader">' + chapter_nav + audio_preview_html(series,chapters,previews,link) + ''.join(chapter_html({**c, 'content_text': c['content_text'][:1200]}) + f'<a href="series_{series["id"]}_ch_{c["chapter_num"]}.html">Открыть страницу главы</a>' for c in chapters) +
                    f'<div class="links"><h2>История продолжается…</h2><p>Следующая глава уже ждёт в Telegram. '
                    f'Новому читателю первая платная глава — всего 1 ⭐️.</p><a class="cta" href="{link}">Читать дальше в @{escape(bot_username)}</a></div></article>')
         sticky = f'<aside class="sticky"><span>🔥 Первая платная глава — 1 ⭐️<br>👑 VIP на все книги — 49 ⭐️ / 7 дней</span><a class="cta" href="{link}">Открыть продолжение ➡</a></aside>'
@@ -168,16 +168,16 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             canonical=urljoin(base, filename) if public else '', channel_url=channel, schema=schema, sticky=sticky), encoding='utf-8')
         files.append(filename)
         iv = f'<a href="{escape(series["telegraph_url"])}">Instant View ↗</a>' if series['telegraph_url'] else ''
-        cards.append(f'<section class="card" {search_attributes(search_rows[series["id"]], "book")}><div class="eyebrow">Мир {series["id"]:02d} · Первые главы бесплатно</div>'
-                     f'<h2><a href="{filename}">{escape(series["title"])}</a></h2><p>{escape(complete_excerpt(series["description"], 550))}</p>'
-                     f'<details><summary>Главы · {len(published)}</summary><ol>{"".join(chapter_links)}</ol></details>'
+        cards.append(f'<section class="card" {indexed_attributes(search_rows[series["id"]], "book")}><div class="eyebrow">Мир {series["id"]:02d} · Первые главы бесплатно</div>'
+                     f'<h2><a href="{filename}">{escape(series["title"])}</a></h2><p>{escape(complete_excerpt(series["description"], 220))}</p>'
+                     f'<p><a href="{filename}">Оглавление · {len(published)} глав</a></p>'
                      f'<div class="actions"><a class="cta" href="{link}">Читать в @{escape(bot_username)}</a>{iv}</div></section>')
     genre_links=[]
     for slug,title,genres,intro in SEO_HUBS:
         name='seo_'+slug+'.html';selection=select_books(books,genres,slug=slug)
         entries=[];elements=[]
         for number,book in enumerate(selection,1):
-            s=book['series'];link=bot_link(bot_username,s['id']);book_name=f'series_{s["id"]}.html'
+            s=book['series'];link=f"https://t.me/{bot_username}?start=web_s_{s['id']}";book_name=f'series_{s["id"]}.html'
             excerpt=complete_excerpt(book['chapters'][0]['content_text'],400) if book['chapters'] else ''
             entries.append(f'<article class="card"><div class="eyebrow">{escape(s["genre_title"])} · {book["chapter_count"]} глав</div>'
                 f'<h2><a href="{book_name}">{escape(s["title"])}</a></h2><p>{escape(complete_excerpt(s["description"],450))}</p>'
@@ -190,11 +190,11 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         schema={'@context':'https://schema.org','@type':'ItemList','name':title,'numberOfItems':len(elements),'itemListElement':elements}
         related=''.join(f'<a href="seo_{other}.html">{escape(label)}</a>' for other,label,*_ in SEO_HUBS if other!=slug)
         body=(f'<section class="hero"><div class="eyebrow">Редакционный маршрут NovelPulse</div><h1>{escape(title)}</h1>'
-            f'<p>{escape(intro)}</p><a class="cta" href="https://t.me/{escape(bot_username)}">📖 Открыть каталог в @{escape(bot_username)}</a>'
+            f'<p>{escape(intro)}</p><a class="cta" href="https://t.me/{escape(bot_username)}?start=web_s_1">📖 Открыть каталог в @{escape(bot_username)}</a>'
             '<p>Выбор основан на жанровых полках каталога, а не на рейтинге популярности. '
             'Сравните описание, бесплатный текст и звучание перед тем, как продолжить чтение.</p></section>'
             '<div class="grid">'+''.join(entries)+'</div><section class="links"><h2>Как читать дальше</h2>'
-            f'<p>Откройте книгу в <a href="https://t.me/{escape(bot_username)}">@{escape(bot_username)}</a>. '
+            f'<p>Откройте книгу в <a href="https://t.me/{escape(bot_username)}?start=web_s_1">@{escape(bot_username)}</a>. '
             'Для полного продолжения доступны ключи, суточный таймер, покупка главы и VIP. '
             'Первые главы и короткие аудиофрагменты помогают выбрать подходящий мир.</p>'
             '<a href="podcast.xml">RSS аудиопревью</a></section>'
@@ -204,7 +204,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         files.append(name)
         hub_search={'title':title,'description':intro,'genre_slug':' '.join(genres),
             'chapter_titles':' '.join(search_rows[b['series']['id']]['chapter_titles'] or '' for b in selection)}
-        genre_links.append(f'<a href="{name}" {search_attributes(hub_search, "hub")}>{escape(title)}</a>')
+        genre_links.append(f'<a href="{name}" {indexed_attributes(hub_search, "hub")}>{escape(title)}</a>')
     dates=json.loads(await db.get_state('podcast_first_published') or '{}')
     audio_files=write_podcast(directory,books,previews,base,bot_username,dates)
     await db.set_state('podcast_first_published',json.dumps(dates))
@@ -215,10 +215,12 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             f'<span class="pill">{len(series_list)} новелл</span><span class="pill">Первая покупка — 1 ⭐️</span></section>'
             + web_search_widget() + '<div class="grid">' + ''.join(cards) + '</div>' +
             f'<section class="links"><h2>24 маршрута: выбрать, читать и слушать</h2>{"".join(genre_links)}</section>'
-            f'<section class="links"><h2>Подборки и подкаст</h2><a href="podcast.xml">🎧 RSS аудиопревью NovelPulse Audio</a>{hub_links}</section>' + WEB_SEARCH_SCRIPT)
+            f'<section class="links"><h2>Подборки и подкаст</h2><a href="podcast.xml">🎧 RSS аудиопревью NovelPulse Audio</a>{hub_links}</section>' + '<script src="catalog.js" defer></script>')
+    search_js = 'const index=' + json.dumps(search_index, ensure_ascii=False).replace('<','\\u003c') + ';\n' + "document.querySelectorAll('[data-search-id]').forEach(el=>{Object.assign(el.dataset,index[el.dataset.searchId]);});\n" + WEB_SEARCH_SCRIPT.removeprefix('<script>').removesuffix('</script>')
+    (directory/'catalog.js').write_text(search_js, encoding='utf-8')
     (directory / 'index.html').write_text(shell('NovelPulse — веб-новеллы и ЛитРПГ на русском',
         'Библиотека русских переводов: ЛитРПГ, Исэкай, Система. Первые главы бесплатно, продолжение в Telegram.',
-        body, canonical=urljoin(base, 'index.html') if public else '', channel_url=channel,
+        body, verification=google_site_verification, canonical=urljoin(base, 'index.html') if public else '', channel_url=channel,
         rss=f'<link rel="alternate" type="application/rss+xml" title="NovelPulse Audio" href="{escape(urljoin(base,"podcast.xml"))}">'), encoding='utf-8')
     files.insert(0, 'index.html')
     ET.register_namespace('', 'http://www.sitemaps.org/schemas/sitemap/0.9')
@@ -236,7 +238,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         '`python -m app.web_portal --bot-username NovelPulseBot --channel @novelpulse_litrpg`.\n'
         'Размещайте только содержимое docs/. Не размещайте .env, data/, SQLite и приватный аккаунт Telegraph.\n'
         'Для IndexNow нужен собственный домен и проверочный ключ на нём; чужой домен telegra.ph отправлять нельзя.\n', encoding='utf-8')
-    report = {'series_count': len(series_list), 'files': files + ['podcast.xml',*audio_files,'sitemap.xml', 'robots.txt', 'DEPLOY.md'],
+    report = {'series_count': len(series_list), 'files': files + ['styles.css','catalog.js','podcast.xml',*audio_files,'sitemap.xml', 'robots.txt', 'DEPLOY.md'],
               'seo_pages':24,'podcast_episodes':len(audio_files),'podcast_audio_files':audio_files,
               'directory': str(directory.resolve()), 'base_url': base, 'public_base_configured': public}
     await db.set_state('web_portal_report', json.dumps(report, ensure_ascii=False))
@@ -249,7 +251,7 @@ async def _cli(args):
     await db.open()
     try:
         report = await generate_web_portal(db, args.bot_username, output_dir=args.output_dir,
-            base_url=args.base_url or settings.web_base_url, channel_id=args.channel)
+            base_url=args.base_url or settings.web_base_url, channel_id=args.channel,google_site_verification=settings.google_site_verification)
         print(json.dumps(report, ensure_ascii=True, indent=2))
     finally:
         await db.close()

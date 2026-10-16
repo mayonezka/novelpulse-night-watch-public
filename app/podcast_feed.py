@@ -66,7 +66,7 @@ def write_podcast(directory,books,previews,base,username,published_dates):
         (directory/name).write_bytes(data)
         item=ET.SubElement(channel,'item')
         field(item,'title',series['title']+' — аудиознакомство')
-        link=f'https://t.me/{username}?start=series_{sid}'
+        link=f'https://t.me/{username}?start=rss_s_{sid}'
         field(item,'link',link)
         field(item,'description',f'{series["description"][:700]}\n\nФрагмент бесплатной первой главы: '
             f'{preview.get("transcript","")}\n\nЧитать и слушать продолжение: {link}')

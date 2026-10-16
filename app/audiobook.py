@@ -140,7 +140,7 @@ def preview_fingerprint(chapter: dict) -> str:
 
 
 async def prepare_web_audio_previews(db) -> dict:
-    """Only public free-chapter snippets become data URIs; no MP3 retained on disk."""
+    """Cache only authorized free snippets; the portal exports one shared static MP3 per series."""
     from app.promotional_text import complete_excerpt
     previews = json.loads(await db.get_state('web_audio_previews') or '{}')
     for series in await db.list_series():
@@ -159,7 +159,7 @@ async def prepare_web_audio_previews(db) -> dict:
             path = await render_chapter_audio({**chapter, 'content_text': snippet}, series)
             encoded = base64.b64encode(Path(path).read_bytes()).decode('ascii')
             if len(encoded) > 350_000:
-                raise ValueError('Превью слишком велико для встроенного web-плеера')
+                raise ValueError('Превью превышает бюджет публичного аудиофрагмента')
             previews[str(series['id'])] = {'source_digest': digest, 'chapter_id': chapter['id'],
                 'audio_base64': encoded, 'transcript': snippet}
             await db.set_state('web_audio_previews',json.dumps(previews,ensure_ascii=False))

@@ -21,6 +21,7 @@ class PipelineSettings(BaseSettings):
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     llm_model: str = "gemini-3.8-flash"
     web_base_url: str | None = None
+    google_site_verification: str = ''
 
     @field_validator("web_base_url", mode="before")
     @classmethod

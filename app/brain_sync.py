@@ -56,6 +56,7 @@ STAGES = (
     '37. 24 жанровых SEO-маршрута, 120 HTML-страниц, RSS с постоянными аудиопревью, двусторонний Рейд, горизонтальный аудиоформат и поисковое описание канала.',
     '38. Зал Славы с приватными именами и отдельными учебными NPC, поиск по сюжетам и заголовкам в боте и на сайте, мост Telegraph → библиотека/жанры/RSS.',
     '39. Воронка наблюдаемых событий, четыре входа /start, XP-only quiz/Stories и Рейд после доставки главы 1; быстрые и полные тесты.',
+    '40. Общие внешние MP3 и CSS/JS, web/RSS атрибуция, шесть полных оригинальных глав и технический SEO-аудит.',
 )
 
 
@@ -87,7 +88,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification','stage37_verification','stage38_verification','stage39_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification','stage37_verification','stage38_verification','stage39_verification','stage40_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -162,6 +163,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 35: ' + state.get('stage35_verification','ещё не зафиксированы; см. data/stage35_live_report.json.'), '',
         'Проверки Stage 36: ' + state.get('stage36_verification','ещё не зафиксированы; см. data/stage36_live_report.json.'), '',
         'Проверки Stage 37: ' + state.get('stage37_verification','ещё не зафиксированы; см. data/stage37_live_report.json.'), '',
+        'Проверки Stage 40: ' + state.get('stage40_verification','ещё не зафиксированы; см. data/stage40_live_report.json.'), '',
         'Проверки Stage 39: ' + state.get('stage39_verification','ещё не зафиксированы; см. data/stage39_live_report.json.'), '',
         'Проверки Stage 38: ' + state.get('stage38_verification','ещё не зафиксированы; см. data/stage38_live_report.json.'), '',
     ])

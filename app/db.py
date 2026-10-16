@@ -1844,8 +1844,13 @@ class Database:
             )
 
     async def seed_demo(self) -> tuple[int, list[int]]:
-        from app import demo
         async with self._lock:
+            existing = await self._one("SELECT id FROM series WHERE slug = 'demo-the-signal'")
+            edition = await self._one("SELECT COUNT(*) n FROM chapters WHERE series_id=1 AND length(content_text)>=2500")
+            if existing and edition['n'] >= 6:
+                rows = await self._all('SELECT id FROM chapters WHERE series_id=? ORDER BY chapter_num', (existing['id'],))
+                return existing['id'], [r['id'] for r in rows]
+            from app import demo
             await self.connection.execute("BEGIN IMMEDIATE")
             try:
                 await self.connection.execute(
@@ -1869,6 +1874,35 @@ class Database:
             except BaseException:
                 await self.connection.rollback()
                 raise
+
+    async def expand_original_flagship(self) -> list[dict]:
+        """Install original IP atomically, preserving existing chapter/purchase identities."""
+        from app.demo import FLAGSHIP_CHAPTERS
+        for number, (_, text) in enumerate(FLAGSHIP_CHAPTERS, 1):
+            low, high = (3000, 4500) if number <= 2 else (2500, 3500)
+            if not low <= len(text) <= high:
+                raise ValueError('Original chapter length outside editorial budget')
+        async with self._lock:
+            await self.connection.execute('BEGIN IMMEDIATE')
+            try:
+                book = await self._one("SELECT id FROM series WHERE id=1 AND slug='demo-the-signal'")
+                if not book:
+                    raise ValueError('Series 1 original IP identity is not confirmed')
+                for number, (title, text) in enumerate(FLAGSHIP_CHAPTERS, 1):
+                    price = 5 if number <= 3 else 10
+                    await self.connection.execute(
+                        'INSERT INTO chapters(series_id,chapter_num,title,content_text,price_stars,is_published) '
+                        'VALUES(1,?,?,?,?,1) ON CONFLICT(series_id,chapter_num) DO UPDATE SET '
+                        'title=excluded.title,content_text=excluded.content_text,price_stars=excluded.price_stars,is_published=1',
+                        (number,title,text,price))
+                await self.connection.execute('UPDATE series SET free_chapters_limit=2 WHERE id=1')
+                await self.connection.execute("INSERT INTO app_state(key,value) VALUES('original_flagship_version','40') "
+                    'ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+                await self.connection.commit()
+            except BaseException:
+                await self.connection.rollback()
+                raise
+            return await self._all('SELECT id,chapter_num,price_stars,length(content_text) characters FROM chapters WHERE series_id=1 ORDER BY chapter_num')
 
     async def save_chapter(self, series_id: int, chapter_num: int, title: str, content: str, price_stars: int, published: bool) -> int:
         if chapter_num < 1 or price_stars < 1 or not title.strip() or not content.strip():

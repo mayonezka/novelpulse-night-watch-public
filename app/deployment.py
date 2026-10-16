@@ -41,6 +41,7 @@ def public_static_files(directory: Path, series_ids: list[int], *, secrets: list
         if not match or int(match[1]) not in series_ids:raise ValueError('Invalid public chapter filename')
     names = ['index.html', *[f'series_{i}.html' for i in series_ids], *chapter_pages, 'sitemap.xml', 'robots.txt']
     names.extend(seo_pages)
+    names.extend(n for n in ('styles.css','catalog.js') if (root/n).exists())
     if podcast_feed:names.append('podcast.xml')
     names.extend(podcast_audio)
     if verification_key:
@@ -90,7 +91,7 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     ids = [s['id'] for s in await db.list_series()]
     chapter_pages=[f"series_{sid}_ch_{c['chapter_num']}.html" for sid in ids for c in await db.list_chapters(sid)]
     podcast_audio=await catalog_podcast_assets(db)
-    allowed_names={'index.html','sitemap.xml','robots.txt','podcast.xml',*SEO_FILENAMES,*podcast_audio,
+    allowed_names={'index.html','sitemap.xml','robots.txt','podcast.xml','styles.css','catalog.js',*SEO_FILENAMES,*podcast_audio,
         *[f'series_{sid}.html' for sid in ids],*chapter_pages}
     secret_values = [token, settings.bot_token.get_secret_value(), await db.get_state('telegraph_access_token') or '']
     if settings.llm_api_key:
@@ -131,7 +132,8 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     base_url = f'https://{login.lower()}.github.io/{repo["name"]}/'
     if repo['name'] != 'novelpulse-library':
         raise ValueError('Expected the dedicated novelpulse-library repository')
-    await generate_web_portal(db, username, output_dir=directory, base_url=base_url, channel_id=channel)
+    await generate_web_portal(db, username, output_dir=directory, base_url=base_url, channel_id=channel,
+                              google_site_verification=settings.google_site_verification)
     write_indexnow_key(directory, base_url)
     files = public_static_files(Path(directory), ids, secrets=secret_values,chapter_pages=chapter_pages,
                                verification_key=verification_key,seo_pages=SEO_FILENAMES,
