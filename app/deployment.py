@@ -14,6 +14,7 @@ from app.db import Database
 from app.web_portal import generate_web_portal
 from app.crawler_indexing import indexnow_key, write_indexnow_key, submit_portal_indexnow
 from app.seo_hubs import SEO_FILENAMES
+from app.portal_sections import READER_PAGES
 from app.podcast_feed import catalog_podcast_assets,valid_preview_bytes
 
 
@@ -30,7 +31,7 @@ def message_contains_url(message, url: str) -> bool:
 def public_static_files(directory: Path, series_ids: list[int], *, secrets: list[str] = (), chapter_pages=(), verification_key='',
                         seo_pages=(),podcast_feed=False,podcast_audio=None) -> dict[str, str | bytes]:
     root = directory.resolve()
-    if any(name not in SEO_FILENAMES for name in seo_pages):raise ValueError('Invalid SEO filename')
+    if any(name not in (*SEO_FILENAMES,*READER_PAGES) for name in seo_pages):raise ValueError('Invalid SEO filename')
     podcast_audio=podcast_audio or {}
     for name,data in podcast_audio.items():
         match=re.fullmatch(r'podcast_([1-9][0-9]*)\.mp3',name)
@@ -89,9 +90,10 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
             return await deploy_github_pages(db, settings, username, channel, token, client=owned,
                 directory=directory, indexing_client=indexing_client, indexnow_wait_seconds=indexnow_wait_seconds)
     ids = [s['id'] for s in await db.list_series()]
+    seo_pages = (*SEO_FILENAMES, *(READER_PAGES if await db.get_state('portal_reader_sections') == '1' else ()))
     chapter_pages=[f"series_{sid}_ch_{c['chapter_num']}.html" for sid in ids for c in await db.list_chapters(sid)]
     podcast_audio=await catalog_podcast_assets(db)
-    allowed_names={'index.html','sitemap.xml','robots.txt','podcast.xml','styles.css','catalog.js',*SEO_FILENAMES,*podcast_audio,
+    allowed_names={'index.html','sitemap.xml','robots.txt','podcast.xml','styles.css','catalog.js',*seo_pages,*podcast_audio,
         *[f'series_{sid}.html' for sid in ids],*chapter_pages}
     secret_values = [token, settings.bot_token.get_secret_value(), await db.get_state('telegraph_access_token') or '']
     if settings.llm_api_key:
@@ -136,7 +138,7 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
                               google_site_verification=settings.google_site_verification)
     write_indexnow_key(directory, base_url)
     files = public_static_files(Path(directory), ids, secrets=secret_values,chapter_pages=chapter_pages,
-                               verification_key=verification_key,seo_pages=SEO_FILENAMES,
+                               verification_key=verification_key,seo_pages=seo_pages,
                                podcast_feed=True,podcast_audio=podcast_audio)
     branch = repo['default_branch']
     if state.get('status')=='created':

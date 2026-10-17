@@ -100,6 +100,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
     search_rows = {s['id']: s for s in await db.searchable_catalog()}
     hubs = json.loads(await db.get_state('seo_hubs') or '[]')
     previews = json.loads(await db.get_state('web_audio_previews') or '{}')
+    reader_sections = await db.get_state('portal_reader_sections') == '1'
     original_full = await db.get_state('original_flagship_version') == '40'
     search_index = {}
     def indexed_attributes(row, kind):
@@ -169,7 +170,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
         files.append(filename)
         iv = f'<a href="{escape(series["telegraph_url"])}">Instant View ↗</a>' if series['telegraph_url'] else ''
         cards.append(f'<section class="card" {indexed_attributes(search_rows[series["id"]], "book")}><div class="eyebrow">Мир {series["id"]:02d} · Первые главы бесплатно</div>'
-                     f'<h2><a href="{filename}">{escape(series["title"])}</a></h2><p>{escape(complete_excerpt(series["description"], 220))}</p>'
+                     f'<h2><a href="{filename}">{escape(series["title"])}</a></h2><p>{escape(complete_excerpt(series["description"], 120))}</p>'
                      f'<p><a href="{filename}">Оглавление · {len(published)} глав</a></p>'
                      f'<div class="actions"><a class="cta" href="{link}">Читать в @{escape(bot_username)}</a>{iv}</div></section>')
     genre_links=[]
@@ -209,11 +210,20 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
     audio_files=write_podcast(directory,books,previews,base,bot_username,dates)
     await db.set_state('podcast_first_published',json.dumps(dates))
     hub_links = ''.join(f'<a href="{escape(h["url"])}">{escape(h["title"])} ↗</a>' for h in hubs)
+    reader_navigation = ''
+    if reader_sections:
+        from app.portal_sections import render_reader_sections
+        for name, content in render_reader_sections(books,previews,bot_username,base,channel).items():
+            (directory/name).write_text(content,encoding='utf-8')
+            files.append(name)
+        reader_navigation = ('<section class="links"><h2>Читателю</h2>'
+            '<a href="new_releases.html">Новые поступления</a><a href="audio_library.html">Аудиотека</a>'
+            '<a href="reading_guide.html">Как читать бесплатно: таймер, ключи и VIP</a></section>')
     body = ('<section class="hero"><div class="eyebrow">ЛитРПГ · Исэкай · Система</div>'
             '<h1>Ещё одна глава.<br>Ещё один новый мир.</h1><p>Герои нулевого ранга, опасные системы и приключения, '
             'от которых трудно оторваться. Откройте библиотеку русских переводов — первые главы читаются бесплатно.</p>'
             f'<span class="pill">{len(series_list)} новелл</span><span class="pill">Первая покупка — 1 ⭐️</span></section>'
-            + web_search_widget() + '<div class="grid">' + ''.join(cards) + '</div>' +
+            + reader_navigation + web_search_widget() + '<div class="grid">' + ''.join(cards) + '</div>' +
             f'<section class="links"><h2>24 маршрута: выбрать, читать и слушать</h2>{"".join(genre_links)}</section>'
             f'<section class="links"><h2>Подборки и подкаст</h2><a href="podcast.xml">🎧 RSS аудиопревью NovelPulse Audio</a>{hub_links}</section>' + '<script src="catalog.js" defer></script>')
     search_js = 'const index=' + json.dumps(search_index, ensure_ascii=False).replace('<','\\u003c') + ';\n' + "document.querySelectorAll('[data-search-id]').forEach(el=>{Object.assign(el.dataset,index[el.dataset.searchId]);});\n" + WEB_SEARCH_SCRIPT.removeprefix('<script>').removesuffix('</script>')

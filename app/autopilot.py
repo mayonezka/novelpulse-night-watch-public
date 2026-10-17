@@ -284,7 +284,18 @@ def build_navigator(series: list[dict], username: str, hubs: list[dict], portal_
     for label, hub in zip(("Топ-5 новелл", "Система и попаданцы", "Полный каталог"), hubs):
         lines.append(f"<a href=\"{html.escape(hub['url'], quote=True)}\">🧭 {label}</a>")
     text = "\n".join(lines)
-    if len(text.encode("utf-16-le")) // 2 > 4096:
+    # Telegram limits rendered text after HTML entities are parsed. The URLs in
+    # link attributes do not consume the 4096-character message allowance.
+    from html.parser import HTMLParser
+    class VisibleText(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts = []
+        def handle_data(self, data):
+            self.parts.append(data)
+    visible = VisibleText()
+    visible.feed(text)
+    if len(''.join(visible.parts).encode("utf-16-le")) // 2 > 4096:
         raise ValueError("Навигатор превышает лимит Telegram; сократите названия новелл")
     return text
 

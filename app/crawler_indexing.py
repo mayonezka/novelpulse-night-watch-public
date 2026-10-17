@@ -17,6 +17,7 @@ from app.config import PipelineSettings
 from app.db import Database
 from app.pipeline import failure_reason
 from app.seo_hubs import SEO_FILENAMES
+from app.portal_sections import READER_PAGES
 
 INDEXNOW_ENDPOINTS = ('https://api.indexnow.org/indexnow', 'https://yandex.com/indexnow')
 INDEXNOW_STATE = 'portal_indexnow_report'
@@ -60,7 +61,7 @@ def sitemap_html_urls(directory: str | Path, base_url: str) -> list[str]:
         parsed = urlparse(url)
         name = url.removeprefix(base_url)
         if (not url.startswith(base_url) or parsed.query or parsed.fragment or '%' in url
-                or unquote(name) != name or not (name in SEO_FILENAMES or re.fullmatch(r'(?:index|series_[1-9][0-9]*(?:_ch_[1-9][0-9]*)?)\.html', name))):
+                or unquote(name) != name or not (name in (*SEO_FILENAMES,*READER_PAGES) or re.fullmatch(r'(?:index|series_[1-9][0-9]*(?:_ch_[1-9][0-9]*)?)\.html', name))):
             raise ValueError('Sitemap URL is outside the verified portal HTML scope')
         if url not in urls:
             urls.append(url)
