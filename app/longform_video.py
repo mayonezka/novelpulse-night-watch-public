@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import html
+import re
 from pathlib import Path
 
 
@@ -62,7 +63,7 @@ def _card(series,chapter,path):
         return f,lines
     f,lines=wrapped(str(series['title']),46,1100,3)
     for i,line in enumerate(lines):draw.text((80,135+i*58),line,font=f,fill='#f6d878',stroke_width=1,stroke_fill='black')
-    draw.text((80,345),f'ГЛАВА {chapter["chapter_num"]} / 2',font=font(30),fill='#70dcff')
+    draw.text((80,345),series.get('audio_label',f'ГЛАВА {chapter["chapter_num"]} / 2'),font=font(30),fill='#70dcff')
     f,lines=wrapped(str(chapter['title']),32,1100,2)
     for i,line in enumerate(lines):draw.text((80,400+i*43),line,font=f,fill='white')
     draw.rounded_rectangle((78,548,1202,562),radius=7,fill='#243c48')
@@ -124,15 +125,18 @@ async def _speech(chapter,path,*,mock_tts=False):
                 boundary='SentenceBoundary').save(str(path))
 
 
-async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,mock_tts=False):
+class DurationLimitExceeded(ValueError):
+    def __init__(self,seconds):
+        self.seconds=seconds
+        super().__init__(f'Audiobook exceeds duration budget: {seconds:.3f}s')
+
+
+async def _render_audiobook_video(series,chapters,output_path,*,mock_tts=False,max_duration_seconds=None):
     """Render full chapters 1+2 at 1280x720/12fps, H.264/AAC; caller owns final MP4.
 
     All narration and frame intermediates live in a disposable system temp directory.
     mock_tts is test-only and cannot write to data/ or docs/.
     """
-    chapters=sorted(chapters_1_and_2,key=lambda c:c['chapter_num'])
-    if len(chapters)!=2 or [c['chapter_num'] for c in chapters]!=[1,2]:
-        raise ValueError('Longform requires exactly chapters 1 and 2')
     if any(c.get('series_id',series['id'])!=series['id'] or not c.get('is_published',True)
         or not c.get('content_text','').strip() or len(c['content_text'])>500_000 for c in chapters):
         raise ValueError('Invalid audiobook chapter')
@@ -155,6 +159,8 @@ async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,
             try:await asyncio.shield(rendering)
             except asyncio.CancelledError:await rendering;raise
         total=sum(durations);offset=0
+        if max_duration_seconds is not None and total>=max_duration_seconds:
+            raise DurationLimitExceeded(total)
         for chapter,duration in zip(chapters,durations):
             n=chapter['chapter_num']
             visual=(f'[0:v]fps=12,format=yuv420p[base];color=c=0xb9f27c:s=1120x10:r=12[fill];'
@@ -165,12 +171,16 @@ async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,
                 '-c:v','libx264','-preset','veryfast','-crf','24','-pix_fmt','yuv420p','-c:a','aac',
                 '-ar','48000','-ac','1','-shortest',work/f'clip_{n}.mp4',timeout=max(120,min(7200,duration*3)))
             offset+=duration
-        (work/'concat.txt').write_text("file 'clip_1.mp4'\nfile 'clip_2.mp4'\n",encoding='ascii')
+        (work/'concat.txt').write_text(''.join(f"file 'clip_{c['chapter_num']}.mp4'\n" for c in chapters),encoding='ascii')
         final=work/'audiobook.mp4'
         await _run('-y','-f','concat','-safe','1','-i','concat.txt','-c','copy','-movflags','+faststart',
             '-metadata','title='+str(series['title']),'-metadata','artist=NovelPulse Audio',final,cwd=work)
         with final.open('rb') as stream:header=stream.read(8)
         if final.stat().st_size<1000 or header[4:8]!=b'ftyp':raise RuntimeError('Invalid MP4 container')
+        if max_duration_seconds is not None:
+            from mutagen.mp4 import MP4
+            actual=MP4(final).info.length
+            if actual>=max_duration_seconds:raise DurationLimitExceeded(actual)
         partial=None
         try:
             with tempfile.NamedTemporaryFile(dir=target.parent,suffix='.partial',delete=False) as stream:partial=Path(stream.name)
@@ -181,3 +191,45 @@ async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,
         finally:
             if partial:partial.unlink(missing_ok=True)
     return target
+
+
+async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,mock_tts=False):
+    """Existing full two-chapter edition; no abridgement or schedule changes."""
+    chapters=sorted(chapters_1_and_2,key=lambda c:c['chapter_num'])
+    if len(chapters)!=2 or [c['chapter_num'] for c in chapters]!=[1,2]:
+        raise ValueError('Longform requires exactly chapters 1 and 2')
+    return await _render_audiobook_video(series,chapters,output_path,mock_tts=mock_tts)
+
+
+def sentence_prefix(text,limit):
+    """A contiguous opening ending at punctuation; never splice story scenes."""
+    if len(text)<=limit:return text
+    ends=[m.end() for m in re.finditer(r'[.!?…][»”\"\']*(?=\s|$)',text[:limit])]
+    if not ends or ends[-1]<100:raise ValueError('No complete sentence within narration budget')
+    return text[:ends[-1]].rstrip()
+
+
+async def render_standard_audiobook_video(series,chapter,output_path,*,max_duration_seconds=870,mock_tts=False):
+    """Real measured first-chapter pilot, comfortably below YouTube's 900s limit.
+
+    Try the complete first chapter. If necessary reduce the contiguous excerpt at
+    sentence boundaries and resynthesize at the same +8% rate; never accelerate or
+    cut audio. Failed attempts remove all intermediate media automatically.
+    """
+    if not 30<=max_duration_seconds<=890:raise ValueError('Standard edition budget must be 30..890 seconds')
+    if chapter['chapter_num']!=1:raise ValueError('Standard pilot requires chapter 1')
+    original=chapter['content_text'].strip();selected=original
+    for attempt in range(4):
+        full=selected==original
+        current={**chapter,'content_text':selected}
+        card={**series,'audio_label':'ГЛАВА 1 · '+('ПОЛНЫЙ ТЕКСТ' if full else 'ОЗНАКОМИТЕЛЬНЫЙ ФРАГМЕНТ')}
+        try:
+            path=await _render_audiobook_video(card,[current],output_path,mock_tts=mock_tts,
+                max_duration_seconds=max_duration_seconds)
+            from mutagen.mp4 import MP4
+            return {'path':str(path),'duration_seconds':MP4(path).info.length,
+                'full_chapter':full,'selected_chars':len(selected),'source_chars':len(original),
+                'narration_text':selected,'speech_rate':'+8%','max_duration_seconds':max_duration_seconds}
+        except DurationLimitExceeded as error:
+            if attempt==3:raise
+            selected=sentence_prefix(selected,int(len(selected)*min(.95,max_duration_seconds/error.seconds*.94)))

@@ -9,11 +9,12 @@ from app.storage_cleanup import media_slot,delete_video
 from app import storage_cleanup
 
 
-def publication_key(series_id):
-    return f'youtube_longform:{series_id}:1-2'
+def publication_key(series_id,*,edition='full'):
+    if edition not in ('full','standard'):raise ValueError('Unknown audiobook edition')
+    return f'youtube_longform:{series_id}:'+('1-2' if edition=='full' else 'standard')
 
 
-def pilot_metadata(series):
+def pilot_metadata(series,*,edition='full',full_chapter=True):
     sid=series['id']
     title=series['title'].split(' (LitRPG')[0].strip()
     heading=f'«{title}» · Главы 1 и 2 (Полная Аудиокнига) | ЛитРПГ'
@@ -23,31 +24,43 @@ def pilot_metadata(series):
         '📖 Продолжить чтение и слушать следующие главы без рекламы в Telegram:\n'
         f'👉 {link}\n\n#литрпг #аудиокнига #ранобэ #система')
     comment=f'📖 Продолжение истории: главы 3 и далее — читать и слушать в Telegram: {link}'
+    if edition=='standard':
+        label='Глава 1 целиком' if full_chapter else 'Начало истории · Аудиофрагмент'
+        heading=f'Рельсотрон против магии | {label} | ЛитРПГ аудиокнига' if sid==5 else f'{title[:45]} | {label}'
+        description=(f'🎧 «{title}» — '+('первая глава полностью.' if full_chapter else 'ознакомительный фрагмент первой главы.')+
+            '\nЕстественная русская озвучка · горизонтальный формат 16:9.\n\n'
+            f'📖 Читать и слушать продолжение в Telegram:\n{link}\n'
+            '🔎 Поиск в Telegram: @NovelPulseBot\n'
+            '📢 Канал: https://t.me/novelpulse_litrpg\n'
+            f'🌐 Библиотека: https://mayonezka.github.io/novelpulse-library/series_{sid}.html\n\n'
+            '#литрпг #аудиокнига #магия #исэкай')
+        comment=f'📖 Первые главы бесплатно, продолжение и аудиоглавы: {link}'
     return {'series_id':sid,'title':heading,'description':description,'comment_text':comment,
-            'bot_link':link,'chapters':[1,2],'speech_rate':'+8%','format':'1280x720'}
+            'bot_link':link,'chapters':[1,2] if edition=='full' else [1],'speech_rate':'+8%','format':'1280x720'}
 
 
-async def plan_longform(db,series_id,*,defer_reason=''):
+async def plan_longform(db,series_id,*,defer_reason='',edition='full'):
     series=await db.get_series(series_id)
     if not series:raise ValueError('Unknown audiobook series')
-    key=publication_key(series_id)
+    key=publication_key(series_id,edition=edition)
     old=json.loads(await db.get_state(key) or '{}')
     if old:return old  # Never downgrade a submitted or published delivery.
-    plan={**pilot_metadata(series),'status':'pending','created_at':datetime.now(timezone.utc).isoformat(),
+    plan={**pilot_metadata(series,edition=edition),'status':'pending','created_at':datetime.now(timezone.utc).isoformat(),
           'defer_reason':defer_reason,'comment_posted':False,'comment_pinned':False,
           'related_video_set':False}
     await db.set_state(key,json.dumps(plan,ensure_ascii=False))
     return plan
 
 
-async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15=False,advanced_features=False):
-    from app.longform_video import render_longform_audiobook_video
+async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15=False,advanced_features=False,
+                                  edition='full'):
+    from app.longform_video import render_longform_audiobook_video,render_standard_audiobook_video
     from app.youtube_uploader import (async_playwright,ensure_chrome,upload_in_studio,
         wait_for_public_video,verify_persisted_video_details,post_first_comment,pin_author_comment,
         DailyUploadLimit)
-    key=publication_key(series_id)
+    key=publication_key(series_id,edition=edition)
     async with media_slot():
-        plan=await plan_longform(db,series_id)
+        plan=await plan_longform(db,series_id,edition=edition)
         if plan['status']=='uploaded':return plan
         if plan.get('defer_reason'):return plan
         blocked=await youtube_blocked_until(db)
@@ -57,7 +70,7 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
             return {**plan,'needs_reconciliation':True}
         directory=Path(root or storage_cleanup.DATA_DIR/'longform').resolve()
         if not directory.is_relative_to(storage_cleanup.DATA_DIR.resolve()):raise ValueError('Longform media must remain within data/')
-        path=directory/f'series_{series_id}_chapters_1_2.mp4'
+        path=directory/(f'series_{series_id}_standard.mp4' if edition=='standard' else f'series_{series_id}_chapters_1_2.mp4')
         series=await db.get_series(series_id)
         chapters=[await db.get_chapter(c['id']) for c in await db.list_chapters(series_id) if c['chapter_num'] in (1,2)]
         series={**series,'chapter_count':len(await db.list_chapters(series_id))}
@@ -67,10 +80,17 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
             if plan.get('error'):
                 plan.setdefault('previous_errors',[]).append(plan.pop('error'))
             await save(status='rendering')
-            await render_longform_audiobook_video(series,chapters,path)
+            if edition=='standard':
+                first=next(c for c in chapters if c['chapter_num']==1)
+                prepared=await render_standard_audiobook_video(series,first,path)
+                await save(**pilot_metadata(series,edition=edition,full_chapter=prepared['full_chapter']),
+                    full_chapter=prepared['full_chapter'],selected_chars=prepared['selected_chars'],
+                    source_chars=prepared['source_chars'],duration_budget=prepared['max_duration_seconds'])
+            else:await render_longform_audiobook_video(series,chapters,path)
             from mutagen.mp4 import MP4
             duration=MP4(path).info.length
             await save(status='rendered',duration_seconds=duration,rendered_bytes=path.stat().st_size)
+            if edition=='standard' and duration>=900:raise ValueError('Standard audiobook must be strictly under 15 minutes')
             if duration>900 and not allow_longer_than_15:
                 await save(status='pending',defer_reason='YouTube: uploads over 15 minutes are not enabled')
                 return plan
@@ -124,11 +144,11 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
                 await save(mp4_deleted=True)
 
 
-async def reconcile_longform(db,series_id):
+async def reconcile_longform(db,series_id,*,edition='full'):
     """Read only persisted public state; no upload or Publish click is retried."""
     from app.youtube_uploader import (async_playwright,ensure_chrome,studio_page,
         wait_for_public_video,verify_persisted_video_details)
-    key=publication_key(series_id)
+    key=publication_key(series_id,edition=edition)
     plan=json.loads(await db.get_state(key) or '{}')
     if not plan.get('video_id'):raise ValueError('No saved longform draft ID')
     async with media_slot():

@@ -61,6 +61,7 @@ STAGES = (
     '42. Каталог 12 новелл / 108 глав: углубление Series 10–11, два Trending-импорта, лёгкий портал, IndexNow, навигатор и Fernet-синхронизация.',
     '43. Каталог 14 новелл / 128 глав, честный retail при цене 10 Stars, 170 страниц с аудиотекой и руководством, IndexNow, навигатор и Fernet-синхронизация.',
     '44. Замороженный каталог 14/128, чистые заголовки глав, честные подписи общего аудиотрейлера, Google verification и свежая наблюдаемая воронка.',
+    '45. Второй горизонтальный аудиопилот стандартного канала: измеренный лимит менее 15 минут, естественная речь +8%, отдельная версия первой главы и три тизера для Telegram.',
 )
 
 
@@ -92,7 +93,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
             shorts = await db._all('SELECT status,COUNT(*) AS count FROM shorts_queue GROUP BY status')
             state = {r['key']: r['value'] for r in await db._all("SELECT key,value FROM app_state WHERE key IN "
                 "('youtube_quota_cooldown_until','youtube_upload_blocked_until','cloud_status','stage22_verification',"
-                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification','stage37_verification','stage38_verification','stage39_verification','stage40_verification','stage41_verification','stage42_verification','stage43_verification','stage44_verification')")}
+                "'factory_metrics','catalog_snapshot_generated_at','stage24_verification','stage25_verification','stage26_verification','stage27_verification','stage28_verification','stage29_verification','stage30_verification','stage31_verification','stage32_verification','stage33_verification','stage34_verification','stage35_verification','stage36_verification','stage37_verification','stage38_verification','stage39_verification','stage40_verification','stage41_verification','stage42_verification','stage43_verification','stage44_verification','stage45_verification')")}
             await db.connection.commit()
         except BaseException:
             await db.connection.rollback()
@@ -168,6 +169,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         'Проверки Stage 36: ' + state.get('stage36_verification','ещё не зафиксированы; см. data/stage36_live_report.json.'), '',
         'Проверки Stage 37: ' + state.get('stage37_verification','ещё не зафиксированы; см. data/stage37_live_report.json.'), '',
         'Проверки Stage 44: ' + state.get('stage44_verification','ещё не зафиксированы; см. data/stage44_live_report.json.'), '',
+        'Проверки Stage 45: ' + state.get('stage45_verification','подготовка; см. data/stage45_prepare_report.json.'), '',
         'Проверки Stage 43: ' + state.get('stage43_verification','ещё не зафиксированы; см. data/stage43_live_report.json.'), '',
         'Проверки Stage 42: ' + state.get('stage42_verification','ещё не зафиксированы; см. data/stage42_live_report.json.'), '',
         'Проверки Stage 41: ' + state.get('stage41_verification','ещё не зафиксированы; см. data/stage41_live_report.json.'), '',
