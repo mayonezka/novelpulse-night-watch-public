@@ -4,7 +4,20 @@ import os
 import shutil
 import subprocess
 import tempfile
+import html
 from pathlib import Path
+
+
+def narration_chunks(text):
+    """Stay below Edge's 4096-byte implicit split without losing any text."""
+    from app.text import split_text
+    pending=split_text(text,1000);chunks=[]
+    while pending:
+        piece=pending.pop(0)
+        if len(html.escape(piece).encode('utf-8'))>3000:
+            pending[:0]=split_text(piece,max(2,len(piece)//2))
+        else:chunks.append(piece)
+    return chunks
 
 
 async def _run(*args,timeout=180,cwd=None):
@@ -73,6 +86,37 @@ async def _speech(chapter,path,*,mock_tts=False):
     import edge_tts
     from app.audiobook import audio_title
     script=audio_title(chapter)+'.\n\n'+chapter['content_text'].strip()
+    chunks=narration_chunks(script)
+    if len(chunks)>1:
+        # Each bounded request has its own retry and file; a failed later chunk
+        # cannot silently turn a partial chapter into a successful audiobook.
+        with tempfile.TemporaryDirectory(prefix='speech-',dir=path.parent) as folder:
+            work=Path(folder);semaphore=asyncio.Semaphore(2)
+            async def piece(number,text):
+                output=work/f'part_{number}.mp3'
+                async with semaphore:
+                    for attempt in range(4):
+                        try:
+                            kwargs={'voice':'ru-RU-DmitryNeural','rate':'+8%'}
+                            if attempt%2:kwargs['boundary']='SentenceBoundary'
+                            async with asyncio.timeout(180):
+                                await edge_tts.Communicate(text,**kwargs).save(str(output))
+                            if not output.exists() or output.stat().st_size<100:
+                                raise RuntimeError('Empty neural narration chunk')
+                            return output
+                        except (edge_tts.exceptions.NoAudioReceived,TimeoutError,RuntimeError):
+                            output.unlink(missing_ok=True)
+                            if attempt==3:raise
+                            await asyncio.sleep(.8*(attempt+1))
+            tasks=[asyncio.create_task(piece(i,text)) for i,text in enumerate(chunks)]
+            try:await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:task.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+                raise
+            (work/'parts.txt').write_text(''.join(f"file 'part_{i}.mp3'\n" for i in range(len(chunks))),encoding='ascii')
+            await _run('-y','-f','concat','-safe','1','-i','parts.txt','-c','copy',path,cwd=work)
+        return
     async with asyncio.timeout(900):
         try:await edge_tts.Communicate(script,voice='ru-RU-DmitryNeural',rate='+8%').save(str(path))
         except edge_tts.exceptions.NoAudioReceived:
