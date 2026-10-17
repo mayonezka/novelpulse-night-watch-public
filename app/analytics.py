@@ -14,6 +14,9 @@ PARENTS=(None,0,1,2,3,3,5)
 def acquisition_source(payload: str | None) -> str:
     if not payload:
         return 'direct'
+    match = re.fullmatch(r'yt_long_s_([1-9][0-9]{0,17})', payload)
+    if match:
+        return 'yt_long:' + match[1]
     match = re.fullmatch(r'(web_s|web_ch|rss_s)_([1-9][0-9]{0,17})', payload)
     if match:
         kind, number = match.groups()

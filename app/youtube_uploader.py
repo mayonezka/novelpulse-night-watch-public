@@ -7,7 +7,7 @@ import subprocess
 import os
 from contextlib import nullcontext
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime,timedelta,timezone
 
 import httpx
@@ -32,7 +32,7 @@ FIRST_COMMENT=('📖 А как бы вы поступили на месте ге
 COMMENT_MATCH=FIRST_COMMENT.removeprefix('📖 ').removesuffix(' 🔥')
 
 
-async def post_first_comment(page,video_id,*,db=None):
+async def post_first_comment(page,video_id,*,db=None,text=FIRST_COMMENT):
     """At most one submit; three pre-submit UI retries share a 15-second budget."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id):
         return {'comment_posted':False,'comment_status':'invalid_video_id'}
@@ -40,6 +40,7 @@ async def post_first_comment(page,video_id,*,db=None):
     previous=json.loads(await db.get_state(key) or '{}') if db else {}
     if previous.get('comment_posted'):return previous
     submitted=previous.get('comment_status') in ('submitting','uncertain')
+    match_text=COMMENT_MATCH if text==FIRST_COMMENT else text.removeprefix('📖 ').strip()
     async def save(state,posted=False):
         result={'comment_posted':posted,'comment_status':state,'video_id':video_id}
         if db:await db.set_state(key,json.dumps(result))
@@ -52,14 +53,14 @@ async def post_first_comment(page,video_id,*,db=None):
                     comments=page.locator('ytd-comments#comments').first
                     await comments.wait_for(state='attached',timeout=2500)
                     await comments.scroll_into_view_if_needed(timeout=1500)
-                    existing=comments.locator('ytd-comment-thread-renderer').filter(has_text=COMMENT_MATCH).first
+                    existing=comments.locator('ytd-comment-thread-renderer').filter(has_text=match_text).first
                     if submitted or await existing.count():
                         await existing.wait_for(state='visible',timeout=1000)
                         return await save('posted',True)
                     placeholder=comments.locator('#placeholder-area').first
                     await placeholder.click(timeout=2000)
                     editor=comments.locator('#contenteditable-root[contenteditable="true"]').first
-                    await editor.fill(FIRST_COMMENT,timeout=1500)
+                    await editor.fill(text,timeout=1500)
                     submit=comments.locator('#submit-button').get_by_role('button').first
                     await submit.wait_for(state='visible',timeout=1000)
                     # Persist BEFORE clicking. A timeout after submit is never auto-reposted.
@@ -201,7 +202,7 @@ async def audit_existing_audience(page, shorts):
 
 
 async def upload_in_studio(page, path, short, description, *, timeout_seconds=900, on_submit=None,
-                           on_draft=None, on_upload_started=None, draft=None):
+                           on_draft=None, on_upload_started=None, draft=None, kind='short'):
     if not draft:
         await page.goto('https://studio.youtube.com', wait_until='domcontentloaded')
         await page.get_by_role('button', name=re.compile(r'^(Создать|Create)$')).first.click()
@@ -217,13 +218,13 @@ async def upload_in_studio(page, path, short, description, *, timeout_seconds=90
         visible_link = page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').filter(visible=True).first
         if await fields.nth(0).is_visible() and await visible_link.count():
             current_href = await visible_link.get_attribute('href')
-            current_id = urlparse(current_href).path.rstrip('/').rsplit('/', 1)[-1]
+            current_id = youtube_video_id(current_href)
         if current_id != draft['video_id']:
             await page.goto('https://studio.youtube.com', wait_until='domcontentloaded')
             await page.get_by_role('button', name=re.compile(r'^(Создать|Create)$')).first.wait_for(state='visible')
             base = page.url.split('/channel/')[0] + '/channel/' + page.url.split('/channel/')[1].split('/')[0]
             await page.goto(base + '/videos/upload', wait_until='domcontentloaded')
-            await page.get_by_role('tab', name='Shorts', exact=True).click()
+            await page.get_by_role('tab', name='Shorts' if kind=='short' else re.compile(r'^(Видео|Videos)$'), exact=True).click()
             await page.locator(f'a[href="/video/{draft["video_id"]}/edit"]').filter(visible=True).first.click()
     fields = page.locator('ytcp-social-suggestions-textbox #textbox')
     await fields.nth(0).wait_for(state='visible')
@@ -240,9 +241,8 @@ async def upload_in_studio(page, path, short, description, *, timeout_seconds=90
             raise DailyUploadLimit('YouTube установил суточный лимит: загрузка доступна после проверки канала владельцем или сброса лимита') from None
         raise
     draft_url = await video_link.get_attribute('href')
-    parsed = urlparse(draft_url)
-    draft_id = parsed.path.rstrip('/').rsplit('/', 1)[-1]
-    if parsed.hostname not in ('youtube.com', 'www.youtube.com', 'youtu.be') or not re.fullmatch(r'[A-Za-z0-9_-]{11}', draft_id):
+    draft_id = youtube_video_id(draft_url)
+    if not draft_id:
         raise RuntimeError('YouTube не вернул ID черновика')
     if draft and draft_id != draft['video_id']:
         raise RuntimeError('Открыт другой черновик; публикация отменена')
@@ -260,10 +260,20 @@ async def upload_in_studio(page, path, short, description, *, timeout_seconds=90
     if on_submit:
         await on_submit()  # From here an ambiguous failure MUST NOT trigger a duplicate.
     await page.get_by_role('button', name=re.compile(r'^(Опубликовать|Publish)$')).first.click()
-    return await wait_for_public_video(page, draft_id, short['title'], timeout_seconds=timeout_seconds)
+    kwargs={'timeout_seconds':timeout_seconds}
+    if kind!='short':kwargs['kind']=kind
+    return await wait_for_public_video(page, draft_id, short['title'], **kwargs)
 
 
-async def wait_for_public_video(page, video_id, title='', *, timeout_seconds=900):
+def youtube_video_id(url):
+    parsed=urlparse(url or '')
+    if parsed.scheme!='https' or parsed.hostname not in ('youtube.com','www.youtube.com','youtu.be'):
+        return None
+    value=parse_qs(parsed.query).get('v',[''])[0] if parsed.path=='/watch' else parsed.path.rstrip('/').rsplit('/',1)[-1]
+    return value if re.fullmatch(r'[A-Za-z0-9_-]{11}',value) else None
+
+
+async def wait_for_public_video(page, video_id, title='', *, timeout_seconds=900, kind='short'):
     """Poll persisted Studio state; a processing dialog is not a publication receipt."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
         raise ValueError('Invalid YouTube video ID')
@@ -273,7 +283,7 @@ async def wait_for_public_video(page, video_id, title='', *, timeout_seconds=900
     channel_url = page.url.split('/channel/')[0] + '/channel/' + page.url.split('/channel/')[1].split('/')[0]
     for _ in range(max(1, timeout_seconds // 5)):
         await page.goto(channel_url + '/videos/upload', wait_until='domcontentloaded')
-        await page.get_by_role('tab', name='Shorts', exact=True).click()
+        await page.get_by_role('tab', name='Shorts' if kind=='short' else re.compile(r'^(Видео|Videos)$'), exact=True).click()
         row = page.locator('ytcp-video-row').filter(has=page.locator(f'a[href*="/video/{video_id}/edit"]')).first
         try:
             await row.wait_for(state='visible', timeout=5000)
@@ -282,12 +292,91 @@ async def wait_for_public_video(page, video_id, title='', *, timeout_seconds=900
             if (re.search(r'Для всех|Открытый доступ|Public', status)
                     and re.search(r'Опубликовано|Published', status)
                     and not re.search(r'Обрабатывается|Обработка|Processing|Uploading|Загрузка', status, re.I)):
-                return {'video_id':video_id, 'url':'https://www.youtube.com/shorts/'+video_id,
+                return {'video_id':video_id, 'url':('https://www.youtube.com/shorts/' if kind=='short' else 'https://www.youtube.com/watch?v=')+video_id,
                         'visibility':'public', 'audience':NOT_KIDS}
         except Exception:
             pass
         await asyncio.sleep(5)
     raise RuntimeError('Запрос публикации принят, но готовый публичный ролик не подтверждён; новая загрузка запрещена')
+
+
+async def verify_persisted_video_details(page, video_id, title, description):
+    """Reopen persisted editor fields; never infer audience from a publish click."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id):raise ValueError('Invalid video ID')
+    await page.goto(f'https://studio.youtube.com/video/{video_id}/edit',wait_until='domcontentloaded')
+    radio=page.locator(f'[name="{NOT_KIDS}"]').first
+    await radio.wait_for(state='attached',timeout=20000)
+    selected=await radio.evaluate("e=>e.checked===true||e.hasAttribute('checked')||e.getAttribute('aria-checked')==='true'")
+    fields=page.locator('ytcp-social-suggestions-textbox #textbox')
+    await fields.nth(0).wait_for(state='visible',timeout=15000)
+    if not selected or (await fields.nth(0).inner_text()).strip()!=title.strip() \
+            or (await fields.nth(1).inner_text()).strip()!=description.strip():
+        raise RuntimeError('Persisted audience/title/description verification failed')
+    return {'audience':NOT_KIDS,'audience_verified':True,'metadata_verified':True}
+
+
+async def pin_author_comment(page, video_id, text, *, db=None):
+    """Pin only the exact author comment; unavailable account features are explicit."""
+    key='youtube_comment:'+video_id
+    previous=json.loads(await db.get_state(key) or '{}') if db else {}
+    if not previous.get('comment_posted'):
+        return {'comment_pinned':False,'pin_status':'comment_not_confirmed'}
+    try:
+        async with asyncio.timeout(25):
+            await page.goto('https://www.youtube.com/watch?v='+video_id,wait_until='domcontentloaded')
+            comments=page.locator('ytd-comments#comments').first
+            await comments.wait_for(state='attached',timeout=8000)
+            await comments.scroll_into_view_if_needed()
+            match=text.removeprefix('📖 ').strip()
+            thread=comments.locator('ytd-comment-thread-renderer').filter(has_text=match).first
+            await thread.wait_for(state='visible',timeout=8000)
+            if await thread.get_by_text(re.compile(r'Закреплено|Pinned by')).count():
+                result={'comment_pinned':True,'pin_status':'verified'}
+            else:
+                await thread.locator('#action-menu').first.click()
+                await page.get_by_text(re.compile(r'^(Закрепить|Pin)$')).filter(visible=True).first.click(timeout=3000)
+                # YouTube may present a confirmation sheet before pinning.
+                dialog=page.get_by_role('dialog').filter(has_text=re.compile(r'Закрепить|Pin'))
+                if await dialog.count():
+                    await dialog.get_by_role('button',name=re.compile(r'^(Закрепить|Pin)$')).last.click()
+                await thread.get_by_text(re.compile(r'Закреплено|Pinned by')).first.wait_for(state='visible',timeout=5000)
+                result={'comment_pinned':True,'pin_status':'verified'}
+    except Exception as error:
+        result={'comment_pinned':False,'pin_status':'unavailable','pin_reason':type(error).__name__}
+    if db:await db.set_state(key,json.dumps({**previous,**result}))
+    return result
+
+
+async def set_short_related_video(page, short_video_id, long_video_id, *, db=None):
+    """Use the visible Related Video picker, then reload to verify persistence."""
+    for value in (short_video_id,long_video_id):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}',value):raise ValueError('Invalid YouTube video ID')
+    result={'short_video_id':short_video_id,'long_video_id':long_video_id,'related_video_set':False}
+    try:
+        async with asyncio.timeout(45):
+            await page.goto(f'https://studio.youtube.com/video/{short_video_id}/edit',wait_until='domcontentloaded')
+            related=page.get_by_text(re.compile(r'^(Видео по теме|Related video)$')).first
+            await related.wait_for(state='visible',timeout=15000)
+            await related.click()
+            dialog=page.get_by_role('dialog').filter(visible=True).last
+            await dialog.wait_for(state='visible',timeout=5000)
+            search=dialog.get_by_role('textbox').first
+            await search.fill('https://www.youtube.com/watch?v='+long_video_id)
+            choice=dialog.locator(f'[href*="{long_video_id}"], [data-video-id="{long_video_id}"]').first
+            await choice.wait_for(state='visible',timeout=8000)
+            await choice.click()
+            done=dialog.get_by_role('button',name=re.compile(r'^(Готово|Done|Сохранить|Save)$'))
+            if await done.count():await done.last.click()
+            save=page.get_by_role('button',name=re.compile(r'^(Сохранить|Save)$')).first
+            if await save.is_enabled():
+                await save.click();await expect(save).to_be_disabled(timeout=15000)
+            await page.reload(wait_until='domcontentloaded')
+            await page.locator(f'a[href*="{long_video_id}"]').first.wait_for(state='attached',timeout=10000)
+            result.update(related_video_set=True,status='verified')
+    except Exception as error:
+        result.update(status='unavailable',reason=type(error).__name__)
+    if db:await db.set_state('youtube_related:'+short_video_id,json.dumps(result))
+    return result
 
 
 async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9222', launch=True, root=None,

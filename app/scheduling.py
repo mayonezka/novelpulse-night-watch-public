@@ -1,6 +1,7 @@
 """UTC upload clock independent of browser, rendering and Telegram polling."""
 
 from datetime import datetime, timezone, timedelta
+import json
 
 MAX_YOUTUBE_UPLOADS_PER_24H = 4
 
@@ -42,6 +43,16 @@ async def youtube_blocked_until(db, *, now: datetime | None = None):
     uploads = await db._all("SELECT published_at FROM short_publications WHERE provider='youtube' "
         "AND julianday(published_at)>julianday(?)-1 AND julianday(published_at)<=julianday(?) "
         "ORDER BY julianday(published_at)", (now.isoformat(), now.isoformat()))
+    # The provider's daily allowance covers horizontal pilots as well as Shorts.
+    for row in await db._all("SELECT value FROM app_state WHERE key LIKE 'youtube_longform:%'"):
+        try:
+            receipt=json.loads(row.get('value') or '{}')
+            stamp=parse_utc(receipt['published_at'])
+            if receipt.get('status')=='uploaded' and now-timedelta(hours=24)<stamp<=now:
+                uploads.append({'published_at':stamp.isoformat()})
+        except (ValueError,KeyError,TypeError):
+            continue
+    uploads.sort(key=lambda item:parse_utc(item['published_at']))
     if len(uploads) >= MAX_YOUTUBE_UPLOADS_PER_24H:
         until = parse_utc(uploads[-MAX_YOUTUBE_UPLOADS_PER_24H]['published_at']) + timedelta(hours=24)
         if until > now:

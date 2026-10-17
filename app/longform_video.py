@@ -55,8 +55,8 @@ def _card(series,chapter,path):
     draw.rounded_rectangle((78,548,1202,562),radius=7,fill='#243c48')
     count=series.get('chapter_count',0)
     chapter_range=f'3–{count}' if count>=3 else '3+'
-    draw.text((80,595),f'Читать и слушать Главы {chapter_range} в Telegram: t.me/NovelPulseBot',font=font(25),fill='#b9f27c')
-    draw.text((80,633),'Ссылка в описании · продолжение истории в боте',font=font(22),fill='#e3ece9')
+    draw.text((80,595),f'Читать и слушать Главы {chapter_range} в Telegram:',font=font(25),fill='#b9f27c')
+    draw.text((80,633),f't.me/NovelPulseBot?start=yt_long_s_{series["id"]}',font=font(25),fill='#e3ece9')
     image.save(path,'PNG')
 
 
@@ -74,9 +74,9 @@ async def _speech(chapter,path,*,mock_tts=False):
     from app.audiobook import audio_title
     script=audio_title(chapter)+'.\n\n'+chapter['content_text'].strip()
     async with asyncio.timeout(900):
-        try:await edge_tts.Communicate(script,voice='ru-RU-DmitryNeural',rate='+10%').save(str(path))
+        try:await edge_tts.Communicate(script,voice='ru-RU-DmitryNeural',rate='+8%').save(str(path))
         except edge_tts.exceptions.NoAudioReceived:
-            await edge_tts.Communicate(script,voice='ru-RU-DmitryNeural',rate='+10%',
+            await edge_tts.Communicate(script,voice='ru-RU-DmitryNeural',rate='+8%',
                 boundary='SentenceBoundary').save(str(path))
 
 
