@@ -379,6 +379,28 @@ async def set_short_related_video(page, short_video_id, long_video_id, *, db=Non
     return result
 
 
+async def channel_feature_eligibility(page):
+    """Read Studio's actual gates; never start phone/video/identity verification."""
+    await page.goto('https://studio.youtube.com',wait_until='domcontentloaded')
+    await page.get_by_role('button',name=re.compile(r'^(Настройки|Settings)$')).click()
+    dialog=page.locator('#settings-dialog')
+    try:
+        await dialog.get_by_role('menuitem',name=re.compile(r'^(Канал|Channel)$')).click()
+        await dialog.get_by_role('tab',name=re.compile(r'^(Доступность функций|Feature eligibility)$')).click()
+        text=' '.join((await dialog.inner_text()).split())
+        result={}
+        for name,start,end in (('standard','1.','2.'),('intermediate','2.','3.'),('advanced','3.',None)):
+            if start not in text:
+                raise RuntimeError('Studio feature eligibility has not loaded')
+            section=text.split(start,1)[-1]
+            if end:section=section.split(end,1)[0]
+            state=re.search(r'Включены|Enabled|Можно включить|Eligible',section,re.I)
+            result[name]=bool(state and state[0].casefold() in ('включены','enabled'))
+        return result
+    finally:
+        await dialog.get_by_role('button',name=re.compile(r'^(Закрыть|Close)$')).click()
+
+
 async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9222', launch=True, root=None,
                                resume=False, claimed_short=None, manage_slot=True, keep_media=False,
                                background=False, settings=None, rendered_path=None):

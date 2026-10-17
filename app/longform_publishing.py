@@ -64,6 +64,8 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
         async def save(**values):
             plan.update(values);await db.set_state(key,json.dumps(plan,ensure_ascii=False))
         try:
+            if plan.get('error'):
+                plan.setdefault('previous_errors',[]).append(plan.pop('error'))
             await save(status='rendering')
             await render_longform_audiobook_video(series,chapters,path)
             from mutagen.mp4 import MP4
