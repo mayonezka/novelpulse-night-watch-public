@@ -45,8 +45,10 @@ def escape(value) -> str:
 
 
 def clean_chapter_title(chapter_num: int, title: str) -> str:
-    """Remove only redundant labels for this chapter, without changing stored text."""
-    prefix = re.compile(rf'^\s*глава\s+0*{int(chapter_num)}(?=$|[\s.:;\-—–|])\s*[.:;\-—–|]*\s*', re.I)
+    """Catalog numbers own the heading; strip source labels, including parts 7.1/7.2."""
+    if int(chapter_num) < 1:
+        raise ValueError('Номер главы должен быть положительным')
+    prefix = re.compile(r'^\s*глава\s+\d+(?:\.\d+)*(?=$|[\s.:;\-—–|])\s*[.:;\-—–|]*\s*', re.I)
     cleaned = str(title or '').strip()
     while True:
         remaining = prefix.sub('', cleaned, count=1)
