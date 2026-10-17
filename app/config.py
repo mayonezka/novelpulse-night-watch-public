@@ -23,6 +23,11 @@ class PipelineSettings(BaseSettings):
     web_base_url: str | None = None
     google_site_verification: str = ''
 
+    @field_validator('google_site_verification', mode='before')
+    @classmethod
+    def clean_google_site_verification(cls, value):
+        return '' if value is None else str(value).strip()
+
     @field_validator("web_base_url", mode="before")
     @classmethod
     def valid_web_base(cls, value):

@@ -44,6 +44,38 @@ def escape(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def clean_chapter_title(chapter_num: int, title: str) -> str:
+    """Remove only redundant labels for this chapter, without changing stored text."""
+    prefix = re.compile(rf'^\s*глава\s+0*{int(chapter_num)}(?=$|[\s.:;\-—–|])\s*[.:;\-—–|]*\s*', re.I)
+    cleaned = str(title or '').strip()
+    while True:
+        remaining = prefix.sub('', cleaned, count=1)
+        if remaining == cleaned:
+            return cleaned
+        cleaned = remaining.strip()
+
+
+def chapter_heading(chapter: dict) -> str:
+    title = clean_chapter_title(chapter['chapter_num'], chapter['title'])
+    return f'Глава {chapter["chapter_num"]}' + (f'. {title}' if title else '')
+
+
+def chapter_body(chapter: dict) -> str:
+    """Hide a duplicated source heading only when the whole first line is a label."""
+    text = chapter['content_text']
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+    first_index = next((index for index, line in enumerate(lines) if line.strip()), None)
+    if first_index is None:
+        return text
+    first = lines[first_index].strip()
+    cleaned = clean_chapter_title(chapter['chapter_num'], first)
+    if cleaned != first and (not cleaned or cleaned == clean_chapter_title(chapter['chapter_num'], chapter['title'])):
+        return ''.join(lines[first_index+1:]).lstrip('\r\n')
+    return text
+
+
 def shell(title: str, description: str, body: str, *, canonical: str, channel_url: str,
           schema: dict | None = None, sticky: str = '', rss: str = '', verification: str = '') -> str:
     metadata = ''
@@ -67,20 +99,24 @@ def shell(title: str, description: str, body: str, *, canonical: str, channel_ur
 
 
 def chapter_html(chapter: dict) -> str:
-    paragraphs = ''.join(f'<p>{escape(p.strip())}</p>' for p in re.split(r'\n\s*\n', chapter['content_text']) if p.strip())
-    return f'<section class="chapter"><h2>Глава {chapter["chapter_num"]}. {escape(chapter["title"])}</h2>{paragraphs}</section>'
+    paragraphs = ''.join(f'<p>{escape(p.strip())}</p>' for p in re.split(r'\n\s*\n', chapter_body(chapter)) if p.strip())
+    return f'<section class="chapter"><h2>{escape(chapter_heading(chapter))}</h2>{paragraphs}</section>'
 
 
-def audio_preview_html(series, chapters, previews, link):
+def audio_preview_html(series, chapters, previews, link, *, chapter_num=None):
     """Reuse the same validated public RSS enclosure on every page of this book."""
     from app.podcast_feed import podcast_assets
     preview = previews.get(str(series['id']), {})
     filename = f'podcast_{series["id"]}.mp3'
     if filename not in podcast_assets([{'series': series, 'chapters': chapters}], previews):
         return f'<aside class="audio-preview"><h2>🎧 Слушайте в Telegram</h2><a href="{escape(link)}">Открыть аудиокнигу в боте</a></aside>'
-    return ('<aside class="audio-preview"><h2>🎧 Послушайте начало истории</h2>'
-            '<p>Короткий аудиофрагмент · русская нейронная озвучка NovelPulse Audio</p>'
-            f'<audio controls preload="none" aria-label="Аудиофрагмент {escape(series["title"])}">'
+    later_chapter = chapter_num is not None and chapter_num >= 2
+    heading = '🎧 Ознакомительный аудиотрейлер новеллы' if later_chapter else '🎧 Послушайте начало истории'
+    description = ('Короткий аудиофрагмент первой главы · Полная аудиозапись этой главы доступна в Telegram-боте NovelPulse'
+        if later_chapter else 'Короткий аудиофрагмент · русская нейронная озвучка NovelPulse Audio')
+    return (f'<aside class="audio-preview"><h2>{heading}</h2>'
+            f'<p>{description}</p>'
+            f'<audio controls preload="none" aria-label="Аудиофрагмент первой главы {escape(series["title"])}">'
             f'<source src="{filename}" type="audio/mpeg">'
             'Ваш браузер не поддерживает аудио. Откройте главу в Telegram.</audio>'
             f'<details><summary>Текст аудиофрагмента</summary><p>{escape(preview.get("transcript",""))}</p></details>'
@@ -124,11 +160,12 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             chapter_name=f"series_{series['id']}_ch_{chapter['chapter_num']}.html"
             chapter_url=urljoin(base,chapter_name)
             direct=f"https://t.me/{bot_username}?start=web_ch_{chapter['id']}"
-            title=f"{series['title']} — Глава {chapter['chapter_num']}: {chapter['title']} | Читать и слушать онлайн на русском"
-            audio=audio_preview_html(series,chapters,previews,direct)
+            heading=chapter_heading(chapter)
+            title=f"{series['title']} — {heading} | Читать и слушать онлайн на русском"
+            audio=audio_preview_html(series,chapters,previews,direct,chapter_num=chapter['chapter_num'])
             full_free = original_full and series['id'] == 1 and chapter['chapter_num'] <= 2
-            excerpt=chapter['content_text'] if full_free else chapter['content_text'][:1200]
-            chapter_description=f"{series['title']} · Глава {chapter['chapter_num']}: {chapter['title']}. {excerpt[:160]}"
+            excerpt=chapter_body(chapter) if full_free else chapter_body(chapter)[:1200]
+            chapter_description=f"{series['title']} · {heading}. {excerpt[:160]}"
             graph={'@context':'https://schema.org','@graph':[
                 {'@type':'Chapter','@id':chapter_url+'#chapter','url':chapter_url,'name':title,
                  'position':chapter['chapter_num'],'inLanguage':'ru','description':excerpt[:250],
@@ -140,8 +177,8 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
                     {'@type':'ListItem','position':3,'name':f"Глава {chapter['chapter_num']}",'item':chapter_url}]}]}
             cta=f'<a class="cta" href="{escape(direct)}">📖 Читать продолжение в Telegram-боте (@{escape(bot_username)})</a>'
             body=(f'<div class="hero"><div class="eyebrow"><a href="index.html">Библиотека</a> / '
-                  f'<a href="{filename}">{escape(series["title"])}</a></div><h1>Глава {chapter["chapter_num"]}: '
-                  f'{escape(chapter["title"])}</h1><p>{escape(series["title"])}</p>{cta}</div>'
+                  f'<a href="{filename}">{escape(series["title"])}</a></div><h1>{escape(heading)}</h1>'
+                  f'<p>{escape(series["title"])}</p>{cta}</div>'
                   f'<article class="reader">{audio}<section class="chapter"><p>{escape(excerpt)}</p>' +
                   ('' if full_free else '<blockquote>…Система скрывает исход этой сцены. Продолжение уже ждёт в боте.</blockquote>') +
                   f'{cta}<p>🎧 Полная аудиоглава и текст — в Telegram. Первая платная глава: 1 ⭐️; VIP на 24 часа: 19 ⭐️.</p>'
@@ -149,7 +186,7 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             (directory/chapter_name).write_text(shell(title,chapter_description,body,canonical=chapter_url if public else '',
                 channel_url=channel,schema=graph,sticky=f'<aside class="sticky">{cta}</aside>'),encoding='utf-8')
             files.append(chapter_name)
-            chapter_links.append(f'<li><a href="{chapter_name}">Глава {chapter["chapter_num"]}: {escape(chapter["title"])}</a></li>')
+            chapter_links.append(f'<li><a href="{chapter_name}">{escape(heading)}</a></li>')
         chapter_nav='<section class="links"><h2>Все главы: читать и слушать</h2><ol>'+''.join(chapter_links)+'</ol></section>'
         schema = {'@context': 'https://schema.org', '@type': 'Book', 'name': series['title'],
                   'inLanguage': 'ru', 'genre': ['ЛитРПГ', 'Веб-новелла'], 'description': series['description'][:700],
