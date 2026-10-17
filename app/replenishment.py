@@ -18,6 +18,47 @@ def _has_cyrillic(value: str) -> bool:
     return bool(re.search(r'[А-Яа-яЁё]', value or ''))
 
 
+async def verify_royalroad_book(db, series_id: int, chapter_count: int) -> dict:
+    """Reject partial imports, untranslated bodies, gaps and incorrect paid prices."""
+    series = await db.get_series(series_id)
+    if not series or 'royalroad.com/fiction/' not in (series.get('source_url') or ''):
+        raise ValueError(f'Series {series_id}: missing RoyalRoad source')
+    rows = [await db.get_chapter(c['id']) for c in await db.list_chapters(series_id)]
+    if {c['chapter_num'] for c in rows} != set(range(1, chapter_count + 1)):
+        raise ValueError(f'Series {series_id}: expected exactly chapters 1–{chapter_count}')
+    if series['free_chapters_limit'] != 2:
+        raise ValueError(f'Series {series_id}: expected two free chapters')
+    for chapter in rows:
+        letters = [c for c in chapter['content_text'] if c.isalpha()]
+        russian = sum(bool(re.match('[А-Яа-яЁё]', c)) for c in letters)
+        if (not letters or russian / len(letters) < .5 or not chapter['is_published']
+                or (chapter['chapter_num'] > 2 and chapter['price_stars'] != 10)):
+            raise ValueError(f'Series {series_id}, chapter {chapter["chapter_num"]}: RU/publication/price validation failed')
+    return series
+
+
+async def expand_catalog_batch(db, settings, *, client, deepen_ids=(10, 11), new_ids=(12, 13)) -> dict:
+    """Resume a bounded catalog release without invoking rendering or upload workers."""
+    deepening = await deepen_existing_royalroad(db, settings, series_ids=deepen_ids,
+        chapters_each=4, target_chapters=10, client=client)
+    if deepening['errors']:
+        raise ValueError(deepening['errors'])
+    for sid in deepen_ids:
+        await verify_royalroad_book(db, sid, 10)
+    imported = []
+    for sid in new_ids:
+        if await db.get_series(sid):
+            series = await verify_royalroad_book(db, sid, 6)
+            entry = {'series_id': sid, 'title': series['title'], 'source_url': series['source_url'], 'resumed': True}
+        else:
+            entry = await import_trending_royalroad_series(db, settings, client=client, chapter_count=6)
+            if entry['series_id'] != sid:
+                raise ValueError(f'Expected Series {sid}, received {entry["series_id"]}')
+            await verify_royalroad_book(db, sid, 6)
+        imported.append(entry)
+    return {'deepening': deepening, 'new_series': imported}
+
+
 async def deepen_existing_royalroad(db, settings, *, series_ids=(3, 4, 5, 6), chapters_each=2,
                                     client=None, target_chapters: int | None = None) -> dict:
     """Import the next source chapters and verify translated, priced SQLite rows."""
