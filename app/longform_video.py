@@ -132,7 +132,7 @@ class DurationLimitExceeded(ValueError):
 
 
 async def _render_audiobook_video(series,chapters,output_path,*,mock_tts=False,max_duration_seconds=None):
-    """Render full chapters 1+2 at 1280x720/12fps, H.264/AAC; caller owns final MP4.
+    """Render validated chapters at 1280x720/12fps, H.264/AAC; caller owns final MP4.
 
     All narration and frame intermediates live in a disposable system temp directory.
     mock_tts is test-only and cannot write to data/ or docs/.
