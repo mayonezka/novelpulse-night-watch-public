@@ -17,7 +17,7 @@ from app.text import split_text
 from app.monetization import VIP_PLANS, VIP_LABELS, vip_options
 from app.gamification import notify_levelups, status_window, leaderboard_window
 from app.search import TROPES, TROPE_IDS, search_catalog
-from app.notifications import notify_admins
+from app.notifications import new_reader_alert
 from app.quiz import question_card,result_card,recommended_series,referral_text
 from app.reviews import rating_line,review_button,register_handlers as register_reviews
 from app.referrals import RAID_LABEL,raid_share_url,announce_reading_reward
@@ -289,13 +289,11 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         return
     referred_by = int(command.args.split('_')[1]) if command.args and re.fullmatch(r"(?:ref|raid)_[1-9][0-9]{0,17}", command.args) else None
     inviter, created = await db.ensure_user(message.from_user.id, message.from_user.username, referred_by, registration_details=True)
+    source = acquisition_source(command.args)
+    await db.record_funnel_event(message.from_user.id,'bot_start',source=source)
     if created and message.from_user.id not in settings.admin_ids:
-        total = (await db.stats())['total_users']
-        name = '@' + message.from_user.username if message.from_user.username else 'без username'
-        await notify_admins(bot, f"👤 Новый читатель в NovelPulse! ID: {message.from_user.id} ({name}), "
-            f"вход: {(command.args or '/start')[:128]}. Всего читателей: {total}",
-            settings=settings, db=db, event_key=f'new_reader:{message.from_user.id}')
-    await db.record_funnel_event(message.from_user.id,'bot_start',source=acquisition_source(command.args))
+        await new_reader_alert(bot, db, message.from_user.id, message.from_user.username,
+            source, start_payload=command.args, settings=settings)
     if inviter:
         await message.answer('⚔️ Приглашение в Рейд принято! Откройте первую главу — тогда вы и ваш напарник получите по +1 🔑. Напарнику +50 XP, вам +25 XP.')
     if command.args and re.fullmatch(r"yt_long_s_[1-9][0-9]{0,17}", command.args):

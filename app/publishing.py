@@ -7,7 +7,8 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, InputPollOption, ReplyParameters
+from aiogram.types import (FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, InputPollOption,
+    ReplyParameters, LinkPreviewOptions)
 from app.shorts import SHORTS_DIR, ensure_short_video
 from app.storage_cleanup import DATA_DIR, media_slot, enforce_zero_mp4_clutter
 from app.youtube_uploader import upload_short_youtube, reconcile_youtube_publication
@@ -21,9 +22,110 @@ STORY_OPTIONS=(
     '🛡 Скрыть свой истинный ранг и изучить уязвимость',
     '📖 Сразу открыть следующую главу в @NovelPulseBot',
 )
+RAIL_TEASER_QUESTION='⚡ Как поступить инженеру с изобретением, которое может изменить ход войны?'
+RAIL_TEASER_OPTIONS=(
+    '⚡ Подать магию молний прямо в рельсотрон',
+    '🛡 Скрыть прототип, пока королевство не узнало о нём',
+    '📖 Читать дальше в @NovelPulseBot',
+)
 
 CHANNEL_SEARCH_DESCRIPTION=('📚 ЛитРПГ, Аудиокниги, Ранобэ и Веб-Новеллы на русском! '
     'Прокачка, Система, Исэкай, Попаданцы. 🎧 Слушай и читай бесплатно в боте: @NovelPulseBot')
+
+
+def load_marketing_teaser(source, markdown_path=None):
+    """Read one ready-to-post copy block by its exact Telegram attribution tag."""
+    from app.analytics import is_telegram_campaign_source
+    if not is_telegram_campaign_source(source):
+        raise ValueError('Некорректная промо-метка')
+    path = Path(markdown_path) if markdown_path else Path(__file__).resolve().parents[1] / 'marketing' / 'stage45_telegram_teasers.md'
+    content = path.read_text(encoding='utf-8')
+    for section in content.split('\n## ')[1:]:
+        title, _, body = section.partition('\n')
+        if f'https://t.me/NovelPulseBot?start={source}' in body:
+            return body.strip()
+    raise ValueError(f'В marketing/stage45_telegram_teasers.md нет тизера для {source}')
+
+
+async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
+    """Publish one idempotent teaser and its native anonymous reply poll."""
+    from app.analytics import is_telegram_campaign_source
+    if not is_telegram_campaign_source(source):
+        raise ValueError('Некорректная промо-метка')
+    key = f'campaign_teaser:{channel_id}:{source}'
+    existing = json.loads(await db.get_state(key) or '{}')
+    if existing.get('state') == 'sent':
+        return existing
+    series = await db.get_series(series_id)
+    if not series:
+        raise ValueError('Новелла для тизера не найдена')
+    username = (await bot.get_me()).username
+    if not username:
+        raise ValueError('У бота нет публичного username')
+    bot_url = f'https://t.me/{username}?start={source}'
+    post = load_marketing_teaser(source).replace(
+        f'https://t.me/NovelPulseBot?start={source}', bot_url)
+    if len(post) > 3500:
+        raise ValueError('Текст тизера превышает безопасный лимит Telegram')
+    async with db._lock:
+        await db.connection.execute('BEGIN IMMEDIATE')
+        try:
+            row = await db._one('SELECT value FROM app_state WHERE key=?', (key,))
+            prior = json.loads(row['value']) if row else {}
+            if prior.get('state') == 'sent':
+                await db.connection.commit()
+                return prior
+            if prior.get('state') in ('sending', 'uncertain'):
+                raise RuntimeError('Публикация тизера требует сверки; повторная отправка исключена')
+            if prior.get('state') == 'teaser_sent' and prior.get('poll_state') == 'uncertain':
+                raise RuntimeError('Отправка опроса неоднозначна; сначала сверьте канал')
+            await db.connection.execute('INSERT INTO app_state(key,value) VALUES (?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                (key, json.dumps({'state': 'sending', 'series_id': series_id, 'source': source})))
+            await db.connection.commit()
+        except BaseException:
+            await db.connection.rollback()
+            raise
+
+    message_id = prior.get('message_id')
+    if not message_id:
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='📖 Читать продолжение в боте ➡️', url=bot_url)],
+            [InlineKeyboardButton(text='🌐 Читать в браузере',
+                url=f'https://mayonezka.github.io/novelpulse-library/series_{series_id}.html')],
+        ])
+        try:
+            posted = await bot.send_message(channel_id, post, parse_mode=None, reply_markup=markup,
+                link_preview_options=LinkPreviewOptions(is_disabled=True))
+        except BaseException as error:
+            definite = isinstance(error, TelegramAPIError) and not isinstance(error, TelegramNetworkError)
+            await db.set_state(key, json.dumps({'state': 'failed' if definite else 'uncertain',
+                'series_id': series_id, 'source': source, 'error_class': type(error).__name__}))
+            raise
+        message_id = posted.message_id
+        prior = {'state': 'teaser_sent', 'message_id': message_id, 'series_id': series_id,
+                 'source': source, 'bot_url': bot_url}
+        await db.set_state(key, json.dumps(prior, ensure_ascii=False))
+
+    poll_state = prior.get('poll_state', 'pending')
+    if poll_state == 'sent':
+        return prior
+    poll_key_state = {**prior, 'state': 'teaser_sent', 'poll_state': 'sending'}
+    await db.set_state(key, json.dumps(poll_key_state, ensure_ascii=False))
+    try:
+        poll = await bot.send_poll(channel_id, question=RAIL_TEASER_QUESTION,
+            options=[InputPollOption(text=option) for option in RAIL_TEASER_OPTIONS],
+            is_anonymous=True,
+            reply_parameters=ReplyParameters(message_id=message_id, allow_sending_without_reply=False))
+    except BaseException as error:
+        definite = isinstance(error, TelegramAPIError) and not isinstance(error, TelegramNetworkError)
+        receipt = {**prior, 'state': 'teaser_sent', 'poll_state': 'failed' if definite else 'uncertain',
+                   'poll_error_class': type(error).__name__}
+        await db.set_state(key, json.dumps(receipt, ensure_ascii=False))
+        raise
+    receipt = {**prior, 'state': 'sent', 'poll_state': 'sent', 'poll_message_id': poll.message_id}
+    await db.set_state(key, json.dumps(receipt, ensure_ascii=False))
+    return receipt
 
 
 async def publish_raid_announcement(db,bot,channel_id,base_url):

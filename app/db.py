@@ -906,9 +906,13 @@ class Database:
                 raise
 
     async def _funnel_event(self, tg_id, event_name, series_id=0, chapter_id=0, source='') -> bool:
-        from app.analytics import EVENTS
+        from app.analytics import EVENTS, normalize_start_source
         if event_name not in EVENTS or not isinstance(source,str) or len(source)>128:
             raise ValueError('Invalid funnel event')
+        if event_name == 'bot_start':
+            # Persist only normalized campaign/deep-link labels. This keeps /funnel
+            # attribution stable and prevents arbitrary start payloads becoming sources.
+            source = normalize_start_source(source)
         cursor=await self.connection.execute('INSERT INTO funnel_events(tg_id,event_name,series_id,chapter_id,source) '
             'VALUES (?,?,?,?,?) ON CONFLICT(tg_id,event_name,series_id,chapter_id,source) DO NOTHING',
             (tg_id,event_name,series_id,chapter_id,source))
@@ -924,6 +928,16 @@ class Database:
         async with self._lock:
             rows=await self._all('SELECT tg_id,event_name,source,created_at FROM funnel_events ORDER BY id')
         return summarize(rows)
+
+    async def funnel_source_reader_count(self, source: str) -> int:
+        """Count distinct readers whose bot_start event carries this source label."""
+        from app.analytics import is_telegram_campaign_source
+        if not is_telegram_campaign_source(source):
+            raise ValueError('Expected a Telegram campaign source')
+        async with self._lock:
+            row = await self._one("SELECT COUNT(DISTINCT tg_id) AS n FROM funnel_events "
+                "WHERE event_name='bot_start' AND source=?", (source,))
+        return int(row['n'])
 
     async def _reward_reading_referral(self,tg_id):
         user=await self._one('SELECT referred_by,referral_rewarded FROM users WHERE tg_id=?',(tg_id,))

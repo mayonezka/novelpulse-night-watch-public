@@ -2,6 +2,7 @@
 import logging
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
 from app.config import Settings
+from app.analytics import is_telegram_campaign_source
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,22 @@ async def retry_owner_alerts(db, bot, settings):
         reports.append(await notify_admins(bot, event['message_text'], db=db, settings=settings,
             event_key=event['event_key'], retry_failed=True))
     return reports
+
+
+async def new_reader_alert(bot, db, tg_id, username, source, *, start_payload=None, settings=None):
+    """Notify owners once for a registration, adding campaign attribution when present."""
+    settings = settings or Settings()
+    name = '@' + username if username else 'без username'
+    if is_telegram_campaign_source(source):
+        count = await db.funnel_source_reader_count(source)
+        text = (f'🎯 Новый читатель по промо-метке {source}! Источник: {source}; '
+                f'Telegram ID: {tg_id} ({name}). Всего привлечено по этой метке: {count}.')
+    else:
+        total = (await db.stats())['total_users']
+        text = (f'👤 Новый читатель в NovelPulse! ID: {tg_id} ({name}), '
+                f'вход: {(start_payload or "/start")[:128]}. Всего читателей: {total}')
+    return await notify_admins(bot, text, settings=settings, db=db,
+        event_key=f'new_reader:{tg_id}')
 
 
 async def revenue_alert(bot, db, message, payment, item, *, settings=None):

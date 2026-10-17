@@ -10,10 +10,30 @@ STAGES = (('Запуск бота',('bot_start',)),('Глава 1',('open_chapte
           ('Оплата Stars',('payment_success',)))
 PARENTS=(None,0,1,2,3,3,5)
 
+# Stable, human-readable acquisition tags used by the Stage 45 Telegram seed posts.
+# Keep these values identical to the /start payloads so /funnel reports each placement.
+TELEGRAM_CAMPAIGN_SOURCES = frozenset({
+    'tg_dark', 'tg_rail', 'tg_humor', 'tg_cultivation', 'tg_isekai', 'tg_tamer',
+})
+_TELEGRAM_CAMPAIGN_PATTERN = re.compile(r'tg_[a-z][a-z0-9_]{0,31}')
+
+
+def is_telegram_campaign_source(source: str) -> bool:
+    return isinstance(source, str) and _TELEGRAM_CAMPAIGN_PATTERN.fullmatch(source) is not None
+
+_CANONICAL_SOURCE_PATTERNS = (
+    re.compile(r'(?:series|ch|ref|raid)_[1-9][0-9]{0,17}'),
+    re.compile(r'web_portal:(?:[1-9][0-9]{0,17}|ch_[1-9][0-9]{0,17})'),
+    re.compile(r'rss_podcast:[1-9][0-9]{0,17}'),
+    re.compile(r'yt_long:[1-9][0-9]{0,17}'),
+)
+
 
 def acquisition_source(payload: str | None) -> str:
     if not payload:
         return 'direct'
+    if is_telegram_campaign_source(payload):
+        return payload
     match = re.fullmatch(r'yt_long_s_([1-9][0-9]{0,17})', payload)
     if match:
         return 'yt_long:' + match[1]
@@ -23,6 +43,15 @@ def acquisition_source(payload: str | None) -> str:
         return ('rss_podcast:' if kind == 'rss_s' else 'web_portal:ch_' if kind == 'web_ch' else 'web_portal:') + number
     if re.fullmatch(r'(?:series|ch|ref|raid)_[1-9][0-9]{0,17}|quiz',payload):
         return payload
+    return 'other'
+
+
+def normalize_start_source(source: str) -> str:
+    """Validate the canonical value persisted for a bot_start funnel event."""
+    if source in {'direct', 'other', 'quiz'} or is_telegram_campaign_source(source):
+        return source
+    if any(pattern.fullmatch(source) for pattern in _CANONICAL_SOURCE_PATTERNS):
+        return source
     return 'other'
 
 
