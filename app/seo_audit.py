@@ -8,10 +8,12 @@ import statistics
 from bs4 import BeautifulSoup
 import httpx
 from app.crawler_indexing import sitemap_html_urls
+from app.site_verification import google_verification_files
 
 
 def html_sizes(directory):
-    sizes = {p.name:p.stat().st_size for p in Path(directory).glob('*.html')}
+    auxiliary = google_verification_files(directory)
+    sizes = {p.name:p.stat().st_size for p in Path(directory).glob('*.html') if p.name not in auxiliary}
     return {'html_count':len(sizes),'average_bytes':round(statistics.mean(sizes.values()),2) if sizes else 0,
             'max_bytes':max(sizes.values(),default=0),'max_file':max(sizes,key=sizes.get) if sizes else '',
             'total_bytes':sum(sizes.values())}
@@ -21,7 +23,9 @@ def audit_portal(directory, base):
     root=Path(directory).resolve()
     urls=sitemap_html_urls(root,base)
     errors=[];titles=[];descriptions=[];pages={}
+    auxiliary = google_verification_files(root)
     for path in root.glob('*.html'):
+        if path.name in auxiliary:continue
         pages[path.name]=BeautifulSoup(path.read_text(encoding='utf-8'),'html.parser')
     expected={urljoin(base,name) for name in pages}
     if len(urls)!=len(set(urls)) or set(urls)!=expected:

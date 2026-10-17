@@ -15,6 +15,7 @@ from app.web_portal import generate_web_portal
 from app.crawler_indexing import indexnow_key, write_indexnow_key, submit_portal_indexnow
 from app.seo_hubs import SEO_FILENAMES
 from app.portal_sections import READER_PAGES
+from app.site_verification import GOOGLE_FILENAME, google_verification_files
 from app.podcast_feed import catalog_podcast_assets,valid_preview_bytes
 
 
@@ -42,6 +43,7 @@ def public_static_files(directory: Path, series_ids: list[int], *, secrets: list
         if not match or int(match[1]) not in series_ids:raise ValueError('Invalid public chapter filename')
     names = ['index.html', *[f'series_{i}.html' for i in series_ids], *chapter_pages, 'sitemap.xml', 'robots.txt']
     names.extend(seo_pages)
+    names.extend(google_verification_files(root))
     names.extend(n for n in ('styles.css','catalog.js') if (root/n).exists())
     if podcast_feed:names.append('podcast.xml')
     names.extend(podcast_audio)
@@ -94,7 +96,7 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     chapter_pages=[f"series_{sid}_ch_{c['chapter_num']}.html" for sid in ids for c in await db.list_chapters(sid)]
     podcast_audio=await catalog_podcast_assets(db)
     allowed_names={'index.html','sitemap.xml','robots.txt','podcast.xml','styles.css','catalog.js',*seo_pages,*podcast_audio,
-        *[f'series_{sid}.html' for sid in ids],*chapter_pages}
+        *[f'series_{sid}.html' for sid in ids],*chapter_pages,GOOGLE_FILENAME}
     secret_values = [token, settings.bot_token.get_secret_value(), await db.get_state('telegraph_access_token') or '']
     if settings.llm_api_key:
         secret_values.append(settings.llm_api_key.get_secret_value())
