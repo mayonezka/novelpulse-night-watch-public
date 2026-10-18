@@ -17,6 +17,7 @@ from app.seo_hubs import SEO_FILENAMES
 from app.portal_sections import READER_PAGES
 from app.site_verification import GOOGLE_FILENAME, google_verification_files
 from app.podcast_feed import catalog_podcast_assets,valid_preview_bytes
+from app.privacy import assert_public_safe
 
 
 def matches_public_text(remote: bytes, local: Path) -> bool:
@@ -71,6 +72,7 @@ def public_static_files(directory: Path, series_ids: list[int], *, secrets: list
                 or re.search(r'(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|[0-9]{8,12}:[A-Za-z0-9_-]{30,})', scanned)
                 or '-----BEGIN PRIVATE KEY-----' in scanned):
             raise ValueError('Secret-like content detected in public static export')
+        assert_public_safe(scanned)
         files[name] = content
     return files
 
@@ -80,6 +82,25 @@ async def github_request(client, method, path, *, expected=(200,), **kwargs):
     if response.status_code not in expected:
         raise ValueError(f'GitHub {method} {path}: HTTP {response.status_code}')
     return response.json() if response.content else {}
+
+
+def pages_repository(login: str, state: dict, configured_base: str | None) -> str:
+    """Transferred organization repositories must never revert to the token owner."""
+    from urllib.parse import urlparse
+    if state.get('provider') == 'github_pages':
+        repository = state.get('repository', '')
+    elif configured_base:
+        parsed = urlparse(configured_base)
+        suffix = '.github.io'
+        if (not parsed.hostname or not parsed.hostname.endswith(suffix)
+                or parsed.path.rstrip('/') != '/novelpulse-library'):
+            raise ValueError('Configured GitHub Pages URL must identify the dedicated library')
+        repository = parsed.hostname[:-len(suffix)] + '/novelpulse-library'
+    else:
+        repository = login + '/novelpulse-library'
+    if not re.fullmatch(r'[A-Za-z0-9-]+/novelpulse-library', repository):
+        raise ValueError('Invalid dedicated public Pages repository')
+    return repository
 
 
 async def deploy_github_pages(db: Database, settings: Settings, username: str, channel: str,
@@ -112,20 +133,22 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
     login = user['login']
     if not re.fullmatch(r'[A-Za-z0-9-]+', login):
         raise ValueError('Invalid GitHub owner')
-    # The dedicated repository name is fixed; permit only its derived verification filename.
-    verification_key = indexnow_key(f'https://{login.lower()}.github.io/novelpulse-library/')
-    allowed_names.add(verification_key + '.txt')
     state = json.loads(await db.get_state('public_web_deployment') or '{}')
+    full_name = pages_repository(login, state, settings.web_base_url)
+    owner = full_name.split('/')[0]
+    base_url = f'https://{owner.lower()}.github.io/novelpulse-library/'
+    verification_key = indexnow_key(base_url)
+    allowed_names.add(verification_key + '.txt')
     if state.get('provider') == 'github_pages':
-        full_name = state['repository']
-        if not full_name.startswith(login + '/'):
-            raise ValueError('Stored repository belongs to another account')
         repo = await github_request(client, 'GET', '/repos/' + full_name)
+        if repo.get('full_name', full_name).casefold() != full_name.casefold():
+            raise ValueError('Repository redirected; update deployment state after transfer')
         tree = await github_request(client, 'GET', f'/repos/{full_name}/git/trees/{repo["default_branch"]}?recursive=1')
         if tree.get('truncated') or any(n['path'] not in allowed_names for n in tree['tree']):
             raise ValueError('Repository contains unexpected files; deployment stopped')
     else:
-        repo = await github_request(client, 'POST', '/user/repos', expected=(201,), json={
+        creation_path = '/user/repos' if owner.casefold() == login.casefold() else '/orgs/' + owner + '/repos'
+        repo = await github_request(client, 'POST', creation_path, expected=(201,), json={
             'name': 'novelpulse-library', 'description': 'Публичная библиотека русских веб-новелл NovelPulse',
             'private': False, 'auto_init': False})
         full_name = repo['full_name']
@@ -133,7 +156,6 @@ async def deploy_github_pages(db: Database, settings: Settings, username: str, c
         await db.set_state('public_web_deployment', json.dumps(state))
     if repo.get('private') or not repo.get('permissions', {}).get('admin'):
         raise ValueError('Dedicated public repository with admin access is required')
-    base_url = f'https://{login.lower()}.github.io/{repo["name"]}/'
     if repo['name'] != 'novelpulse-library':
         raise ValueError('Expected the dedicated novelpulse-library repository')
     await generate_web_portal(db, username, output_dir=directory, base_url=base_url, channel_id=channel,

@@ -20,7 +20,7 @@ class PipelineSettings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     llm_model: str = "gemini-3.8-flash"
-    web_base_url: str | None = None
+    web_base_url: str | None = 'https://novelpulse-books.github.io/novelpulse-library/'
     google_site_verification: str = ''
 
     @field_validator('google_site_verification', mode='before')

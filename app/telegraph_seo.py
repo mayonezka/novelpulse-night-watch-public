@@ -14,7 +14,7 @@ from app.privacy import assert_public_safe, BOT_URL, sanitize_payload
 
 API_URL = "https://api.telegra.ph"
 CONTENT_LIMIT = 64 * 1024
-PORTAL_URL = 'https://mayonezka.github.io/novelpulse-library/'
+PORTAL_URL = 'https://novelpulse-books.github.io/novelpulse-library/'
 BRIDGE_MARKER = '🌐 Библиотека NovelPulse · читать, искать и слушать'
 
 

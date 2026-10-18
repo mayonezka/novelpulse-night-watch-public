@@ -148,7 +148,7 @@ async def generate_orchestrator_handoff(db, *, output_path: str | Path | None = 
         f'РЕАЛИЗОВАННЫЕ ЭТАПЫ 1–{len(STAGES)} (проверяй live-результаты по журналам соответствующего этапа)', *STAGES, '',
         'ПУТИВНЫЕ ТОЧКИ ВХОДА' if False else 'ПУБЛИЧНЫЕ ТОЧКИ ВХОДА',
         'Бот: https://t.me/NovelPulseBot · Канал: https://t.me/novelpulse_litrpg',
-        'Портал: https://mayonezka.github.io/novelpulse-library/', '',
+        'Портал: https://novelpulse-books.github.io/novelpulse-library/', '',
         'СЛЕДУЮЩИЕ ВЕКТОРЫ РОСТА',
         'Измерять конверсию peek → Stars → VIP и удержание D1/D3/D7; тестировать hooks по фактическим просмотрам.',
         'Углублять востребованные новеллы, измерять выдачу и использование streak-ключей.',
