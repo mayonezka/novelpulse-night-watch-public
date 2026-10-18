@@ -11,6 +11,7 @@ from app.autopilot import video_ready
 from app.db import Database
 from app.promotional_text import complete_excerpt
 from app.telegraph_seo import bot_link, channel_link
+from app.privacy import anonymous_series_url, assert_public_safe
 from app.video_gen import EPISODE_LABELS, build_episode_scenes, build_drama_scenes, generate_episode_video, RENDERER_VERSION
 
 SHORTS_DIR = Path('data/shorts_queue')
@@ -108,8 +109,9 @@ def short_copy(series: dict, episode_num: int, username: str, channel_url: str, 
                    "⚡ VIP на 24 часа — 19 ⭐️ · 👑 VIP на 7 дней — 49 ⭐️: все книги.\n\n"
                    f"📖 Читать: {bot_link(username, series['id'])}\n"
                    + (f"📢 Канал: {channel_url}\n" if channel_url else '')
-                   + (f"🌐 Библиотека: {portal_url}\n" if portal_url else '')
+                   + f"🌐 Библиотека: {anonymous_series_url(series)}\n"
                    + "\n#NovelPulse #ЛитРПГ #Исэкай #ВебНовеллы #Shorts #TikTok #VKКлипы")
+    assert_public_safe((title, description))
     return title, description
 
 
