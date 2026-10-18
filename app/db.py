@@ -930,10 +930,10 @@ class Database:
         return summarize(rows)
 
     async def funnel_source_reader_count(self, source: str) -> int:
-        """Count distinct readers whose bot_start event carries this source label."""
-        from app.analytics import is_telegram_campaign_source
-        if not is_telegram_campaign_source(source):
-            raise ValueError('Expected a Telegram campaign source')
+        """Distinct bot readers per validated Telegram or external placement tag."""
+        from app.analytics import is_campaign_source
+        if not is_campaign_source(source):
+            raise ValueError('Expected a supported campaign source')
         async with self._lock:
             row = await self._one("SELECT COUNT(DISTINCT tg_id) AS n FROM funnel_events "
                 "WHERE event_name='bot_start' AND source=?", (source,))

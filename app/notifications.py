@@ -2,7 +2,7 @@
 import logging
 from aiogram.exceptions import TelegramAPIError, TelegramNetworkError
 from app.config import Settings
-from app.analytics import is_telegram_campaign_source
+from app.analytics import is_campaign_source, source_title
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +42,9 @@ async def new_reader_alert(bot, db, tg_id, username, source, *, start_payload=No
     """Notify owners once for a registration, adding campaign attribution when present."""
     settings = settings or Settings()
     name = '@' + username if username else 'без username'
-    if is_telegram_campaign_source(source):
+    if is_campaign_source(source):
         count = await db.funnel_source_reader_count(source)
-        text = (f'🎯 Новый читатель по промо-метке {source}! Источник: {source}; '
+        text = (f'🎯 Новый читатель по промо-метке {source}! Источник: {source_title(source)}; '
                 f'Telegram ID: {tg_id} ({name}). Всего привлечено по этой метке: {count}.')
     else:
         total = (await db.stats())['total_users']

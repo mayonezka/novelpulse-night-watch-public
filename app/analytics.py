@@ -16,10 +16,26 @@ TELEGRAM_CAMPAIGN_SOURCES = frozenset({
     'tg_dark', 'tg_rail', 'tg_humor', 'tg_cultivation', 'tg_isekai', 'tg_tamer',
 })
 _TELEGRAM_CAMPAIGN_PATTERN = re.compile(r'tg_[a-z][a-z0-9_]{0,31}')
+EXTERNAL_CAMPAIGN_LABELS = {
+    'pikabu_s1': 'Пикабу · Нулевой ранг',
+    'dtf_s1': 'DTF · Нулевой ранг',
+    'habr_s1': 'Хабр · Нулевой ранг',
+    'forum_s1': 'Форумы · Нулевой ранг',
+}
+EXTERNAL_CAMPAIGN_SOURCES = frozenset(EXTERNAL_CAMPAIGN_LABELS)
 
 
 def is_telegram_campaign_source(source: str) -> bool:
     return isinstance(source, str) and _TELEGRAM_CAMPAIGN_PATTERN.fullmatch(source) is not None
+
+
+def is_campaign_source(source: str) -> bool:
+    return isinstance(source, str) and (source in EXTERNAL_CAMPAIGN_SOURCES or is_telegram_campaign_source(source))
+
+
+def source_title(source: str) -> str:
+    label = EXTERNAL_CAMPAIGN_LABELS.get(source)
+    return f'{label} [{source}]' if label else source
 
 _CANONICAL_SOURCE_PATTERNS = (
     re.compile(r'(?:series|ch|ref|raid)_[1-9][0-9]{0,17}'),
@@ -32,7 +48,7 @@ _CANONICAL_SOURCE_PATTERNS = (
 def acquisition_source(payload: str | None) -> str:
     if not payload:
         return 'direct'
-    if is_telegram_campaign_source(payload):
+    if is_campaign_source(payload):
         return payload
     match = re.fullmatch(r'yt_long_s_([1-9][0-9]{0,17})', payload)
     if match:
@@ -48,7 +64,7 @@ def acquisition_source(payload: str | None) -> str:
 
 def normalize_start_source(source: str) -> str:
     """Validate the canonical value persisted for a bot_start funnel event."""
-    if source in {'direct', 'other', 'quiz'} or is_telegram_campaign_source(source):
+    if source in {'direct', 'other', 'quiz'} or is_campaign_source(source):
         return source
     if any(pattern.fullmatch(source) for pattern in _CANONICAL_SOURCE_PATTERNS):
         return source
@@ -79,6 +95,7 @@ def summarize(rows: list[dict]) -> dict:
     for source in first.values():sources[source]=sources.get(source,0)+1
     return {'stages':stages,'events':{k:len(v) for k,v in cohorts.items()},
         'sources':sorted(sources.items(),key=lambda item:(-item[1],item[0]))[:10],
+        'external_sources':[(tag,sources.get(tag,0)) for tag in EXTERNAL_CAMPAIGN_LABELS],
         'first_observed_at':rows[0]['created_at'] if rows else None}
 
 
@@ -94,8 +111,12 @@ def funnel_text(summary: dict, *, compact=False) -> str:
             '', 'Процент = доля читателей указанного родительского шага, замеченных и на текущем.',
             'Ключи и Stars — разные ветки от Paywall: шаги 5 и 6 считаются от шага 4, оплата от шага 6.',
             'Источники первого /start:'])
-        lines.extend(f'• {source}: {count}' for source,count in summary['sources'])
-        if not summary['sources']:lines.append('• Пока нет событий')
+        ordinary = [(source,count) for source,count in summary['sources'] if source not in EXTERNAL_CAMPAIGN_SOURCES]
+        lines.extend(f'• {source_title(source)}: {count}' for source,count in ordinary)
+        if not ordinary:lines.append('• Других источников пока нет')
+        lines.append('Внешний посев · первый /start:')
+        external = dict(summary.get('external_sources', summary['sources']))
+        lines.extend(f'• {source_title(source)}: {external.get(source,0)}' for source in EXTERNAL_CAMPAIGN_LABELS)
         lines.append('Начало наблюдений: '+(summary['first_observed_at'] or 'ожидается первый /start')+
             '. Старые действия не выданы за новые события.')
     return '\n'.join(lines)

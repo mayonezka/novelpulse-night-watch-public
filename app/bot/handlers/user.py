@@ -21,7 +21,7 @@ from app.notifications import new_reader_alert
 from app.quiz import question_card,result_card,recommended_series,referral_text
 from app.reviews import rating_line,review_button,register_handlers as register_reviews
 from app.referrals import RAID_LABEL,raid_share_url,announce_reading_reward
-from app.analytics import acquisition_source
+from app.analytics import acquisition_source, EXTERNAL_CAMPAIGN_SOURCES
 
 WELCOME = "📚 Добро пожаловать в NovelPulse! Читайте первые главы эксклюзивных переводов бесплатно и открывайте продолжение за Telegram Stars."
 PEEK_LABEL = '🎲 Показать ещё отрывок бесплатно (1 раз)'
@@ -296,7 +296,9 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
             source, start_payload=command.args, settings=settings)
     if inviter:
         await message.answer('⚔️ Приглашение в Рейд принято! Откройте первую главу — тогда вы и ваш напарник получите по +1 🔑. Напарнику +50 XP, вам +25 XP.')
-    if command.args and re.fullmatch(r"yt_long_s_[1-9][0-9]{0,17}", command.args):
+    if command.args in EXTERNAL_CAMPAIGN_SOURCES:
+        await show_series(bot, message.chat.id, 1, db)
+    elif command.args and re.fullmatch(r"yt_long_s_[1-9][0-9]{0,17}", command.args):
         await show_series(bot, message.chat.id, int(command.args[10:]), db)
     elif command.args and re.fullmatch(r"web_ch_[1-9][0-9]{0,17}", command.args):
         await show_chapter(bot, message.chat.id, message.from_user.id, int(command.args[7:]), db)
