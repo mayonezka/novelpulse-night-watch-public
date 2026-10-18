@@ -8,6 +8,22 @@ import html
 import re
 from pathlib import Path
 
+LONGFORM_CTA_FIRST_LINE = '👇 КЛИКАБЕЛЬНАЯ ССЫЛКА НА ПРОДОЛЖЕНИЕ — В ПЕРВОМ КОММЕНТАРИИ ПОД ВИДЕО!'
+
+
+def with_longform_cta(description):
+    """Keep the comment CTA first and never duplicate it on retries."""
+    body = description.strip()
+    while body.startswith(LONGFORM_CTA_FIRST_LINE):
+        body = body[len(LONGFORM_CTA_FIRST_LINE):].lstrip()
+    return LONGFORM_CTA_FIRST_LINE + '\n\n' + body
+
+
+def longform_card_cta(chapter_count=0):
+    chapter_range = f'3–{chapter_count}' if chapter_count >= 3 else '3+'
+    return ('ПРОДОЛЖЕНИЕ — В ПЕРВОМ КОММЕНТАРИИ ↓',
+            f'Кликабельная ссылка на главы {chapter_range} · Поиск в Telegram: NovelPulseBot')
+
 
 def narration_chunks(text):
     """Stay below Edge's 4096-byte implicit split without losing any text."""
@@ -67,10 +83,9 @@ def _card(series,chapter,path):
     f,lines=wrapped(str(chapter['title']),32,1100,2)
     for i,line in enumerate(lines):draw.text((80,400+i*43),line,font=f,fill='white')
     draw.rounded_rectangle((78,548,1202,562),radius=7,fill='#243c48')
-    count=series.get('chapter_count',0)
-    chapter_range=f'3–{count}' if count>=3 else '3+'
-    draw.text((80,595),f'Читать и слушать Главы {chapter_range} в Telegram:',font=font(25),fill='#b9f27c')
-    draw.text((80,633),f't.me/NovelPulseBot?start=yt_long_s_{series["id"]}',font=font(25),fill='#e3ece9')
+    cta, detail = longform_card_cta(series.get('chapter_count',0))
+    draw.text((80,590),cta,font=font(30),fill='#b9f27c')
+    draw.text((80,636),detail,font=font(22),fill='#e3ece9')
     image.save(path,'PNG')
 
 
