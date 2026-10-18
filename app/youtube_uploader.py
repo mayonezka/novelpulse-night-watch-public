@@ -19,6 +19,7 @@ NOT_KIDS = 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
 UPLOAD_COMPLETE_PATTERN = re.compile(r'(Загрузка(?: видео)? завершена|Upload complete|Проверка завершена|Checks complete|Обработка завершена)', re.I)
 DAILY_LIMIT_PATTERN=re.compile(r'Загрузка недоступна[\s\S]{0,180}24 час|Daily upload limit|upload this video.{0,50}24 hours',re.I)
 from app.scheduling import MAX_YOUTUBE_UPLOADS_PER_24H, youtube_blocked_until
+from app.privacy import sanitize_public_text, assert_public_safe, anonymous_series_url
 
 
 class DailyUploadLimit(RuntimeError):
@@ -34,6 +35,8 @@ COMMENT_MATCH=FIRST_COMMENT.removeprefix('📖 ').removesuffix(' 🔥')
 
 async def post_first_comment(page,video_id,*,db=None,text=FIRST_COMMENT):
     """At most one submit; three pre-submit UI retries share a 15-second budget."""
+    text = sanitize_public_text(text)
+    assert_public_safe(text)
     if not re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id):
         return {'comment_posted':False,'comment_status':'invalid_video_id'}
     key='youtube_comment:'+video_id
@@ -203,6 +206,9 @@ async def audit_existing_audience(page, shorts):
 
 async def upload_in_studio(page, path, short, description, *, timeout_seconds=900, on_submit=None,
                            on_draft=None, on_upload_started=None, draft=None, kind='short'):
+    short = {**short, 'title': sanitize_public_text(short['title'])}
+    description = sanitize_public_text(description)
+    assert_public_safe((short['title'], description))
     if not draft:
         await page.goto('https://studio.youtube.com', wait_until='domcontentloaded')
         await page.get_by_role('button', name=re.compile(r'^(Создать|Create)$')).first.click()
@@ -466,7 +472,8 @@ async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9
                         raise ValueError('Нет проверенного JIT MP4 для передачи в YouTube')
                 from app.config import Settings
                 settings = settings or Settings()
-                description = short['description'] + '\n\nЧитать продолжение в Telegram: https://t.me/novelpulse_litrpg и в боте https://t.me/NovelPulseBot\n' + (settings.web_base_url or '')
+                series = await db.get_series(short['series_id'])
+                description = sanitize_public_text(short['description']) + '\n\nЧитать продолжение в Telegram: https://t.me/novelpulse_litrpg и в боте https://t.me/NovelPulseBot\n' + anonymous_series_url(series)
                 receipt = await upload_in_studio(page, path, short, description, on_submit=mark_submitted,
                                                  on_draft=save_draft, on_upload_started=mark_upload_started, draft=draft)
                 await db.record_short_publication(short['id'], 'youtube', 'studio', receipt['video_id'], finalize=not keep_media)

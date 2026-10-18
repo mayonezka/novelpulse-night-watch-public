@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urljoin
 import httpx
 
 from app.db import Database
+from app.privacy import assert_public_safe, BOT_URL, sanitize_payload
 
 API_URL = "https://api.telegra.ph"
 CONTENT_LIMIT = 64 * 1024
@@ -18,6 +19,11 @@ BRIDGE_MARKER = '🌐 Библиотека NovelPulse · читать, иска�
 
 
 def portal_bridge_nodes(base_url: str = PORTAL_URL) -> list[dict]:
+    try:
+        assert_public_safe(base_url)
+    except ValueError:
+        return [{'tag':'blockquote','children':[BRIDGE_MARKER, {'tag':'br'},
+            {'tag':'a','attrs':{'href':BOT_URL},'children':['📚 Читать и слушать в NovelPulse']}]}]
     parsed = urlparse(base_url)
     if parsed.scheme != 'https' or not parsed.netloc or parsed.query or parsed.fragment or parsed.username:
         raise ValueError('Для SEO-моста нужен публичный HTTPS URL библиотеки')
@@ -194,6 +200,12 @@ def seo_teaser(series: dict, hook: str, bot_username: str) -> str:
 
 async def api_call(client: httpx.AsyncClient, method: str, data: dict) -> dict:
     # POST keeps access tokens out of URLs and HTTP request logs. Do not retry ambiguous creations.
+    if method in ('createPage', 'editPage'):
+        data = dict(data)
+        for field in ('title', 'author_name', 'author_url'):
+            if field in data: data[field] = sanitize_payload(data[field])
+        if 'content' in data:
+            data['content'] = json.dumps(sanitize_payload(json.loads(data['content'])), ensure_ascii=False)
     for attempt in range(3):
         response = await client.post(f"{API_URL}/{method}", data=data, timeout=40)
         if response.status_code >= 400:

@@ -66,6 +66,8 @@ async def run(settings: Settings | None = None, *, cashier_max_seconds: float | 
                 logging.getLogger(__name__).info('PC is online, cloud night-watch standing down')
                 return
         async with Bot(token=settings.bot_token.get_secret_value()) as bot:
+            from app.privacy import PublicPrivacyMiddleware
+            bot.session.middleware(PublicPrivacyMiddleware(settings.channel_id))
             if settings.node_mode == 'bot_24x7':
                 from app.node_sync import sync_catalog
                 try:

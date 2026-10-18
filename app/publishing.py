@@ -15,6 +15,7 @@ from app.youtube_uploader import upload_short_youtube, reconcile_youtube_publica
 from app.notifications import notify_admins
 from app.telegraph_seo import bot_link
 from app.pipeline import failure_reason
+from app.privacy import public_bot, anonymous_series_url, sanitize_public_text
 
 STORY_QUESTION='⚔️ А как бы вы поступили на месте героя в этой главе?'
 STORY_OPTIONS=(
@@ -28,6 +29,20 @@ RAIL_TEASER_OPTIONS=(
     '🛡 Скрыть прототип, пока королевство не узнало о нём',
     '📖 Читать дальше в @NovelPulseBot',
 )
+CULTIVATION_TEASER_QUESTION='🌱 Первая трава принесла награду Системы. Какой будет ваш следующий ход?'
+CULTIVATION_TEASER_OPTIONS=(
+    '🌱 Вырастить редкую траву и рискнуть ради новой награды',
+    '🛡 Спрятать дар Системы и сначала изучить правила мира',
+    '📖 Узнать её следующий шаг в @NovelPulseBot',
+)
+
+
+def campaign_teaser_poll(source):
+    if source == 'tg_rail':
+        return RAIL_TEASER_QUESTION, RAIL_TEASER_OPTIONS
+    if source == 'tg_cultivation':
+        return CULTIVATION_TEASER_QUESTION, CULTIVATION_TEASER_OPTIONS
+    return STORY_QUESTION, STORY_OPTIONS
 
 CHANNEL_SEARCH_DESCRIPTION=('📚 ЛитРПГ, Аудиокниги, Ранобэ и Веб-Новеллы на русском! '
     'Прокачка, Система, Исэкай, Попаданцы. 🎧 Слушай и читай бесплатно в боте: @NovelPulseBot')
@@ -47,8 +62,9 @@ def load_marketing_teaser(source, markdown_path=None):
     raise ValueError(f'В marketing/stage45_telegram_teasers.md нет тизера для {source}')
 
 
-async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
+async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source, teaser_text=None):
     """Publish one idempotent teaser and its native anonymous reply poll."""
+    bot = public_bot(bot)
     from app.analytics import is_telegram_campaign_source
     if not is_telegram_campaign_source(source):
         raise ValueError('Некорректная промо-метка')
@@ -59,11 +75,14 @@ async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
     series = await db.get_series(series_id)
     if not series:
         raise ValueError('Новелла для тизера не найдена')
-    username = (await bot.get_me()).username
+    username = (await bot.me()).username
     if not username:
         raise ValueError('У бота нет публичного username')
     bot_url = f'https://t.me/{username}?start={source}'
-    post = load_marketing_teaser(source).replace(
+    copy = load_marketing_teaser(source) if teaser_text is None else teaser_text.strip()
+    if f'https://t.me/NovelPulseBot?start={source}' not in copy:
+        raise ValueError('В утверждённом тизере нет нужной промо-метки')
+    post = copy.replace(
         f'https://t.me/NovelPulseBot?start={source}', bot_url)
     if len(post) > 3500:
         raise ValueError('Текст тизера превышает безопасный лимит Telegram')
@@ -77,7 +96,7 @@ async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
                 return prior
             if prior.get('state') in ('sending', 'uncertain'):
                 raise RuntimeError('Публикация тизера требует сверки; повторная отправка исключена')
-            if prior.get('state') == 'teaser_sent' and prior.get('poll_state') == 'uncertain':
+            if prior.get('state') == 'teaser_sent' and prior.get('poll_state') in ('sending', 'uncertain'):
                 raise RuntimeError('Отправка опроса неоднозначна; сначала сверьте канал')
             await db.connection.execute('INSERT INTO app_state(key,value) VALUES (?,?) '
                 'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
@@ -92,7 +111,7 @@ async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text='📖 Читать продолжение в боте ➡️', url=bot_url)],
             [InlineKeyboardButton(text='🌐 Читать в браузере',
-                url=f'https://mayonezka.github.io/novelpulse-library/series_{series_id}.html')],
+                url=anonymous_series_url(series))],
         ])
         try:
             posted = await bot.send_message(channel_id, post, parse_mode=None, reply_markup=markup,
@@ -104,7 +123,8 @@ async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
             raise
         message_id = posted.message_id
         prior = {'state': 'teaser_sent', 'message_id': message_id, 'series_id': series_id,
-                 'source': source, 'bot_url': bot_url}
+                 'source': source, 'bot_url': bot_url,
+                 'message_sent_at': datetime.now(timezone.utc).isoformat()}
         await db.set_state(key, json.dumps(prior, ensure_ascii=False))
 
     poll_state = prior.get('poll_state', 'pending')
@@ -112,9 +132,10 @@ async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
         return prior
     poll_key_state = {**prior, 'state': 'teaser_sent', 'poll_state': 'sending'}
     await db.set_state(key, json.dumps(poll_key_state, ensure_ascii=False))
+    question, options = campaign_teaser_poll(source)
     try:
-        poll = await bot.send_poll(channel_id, question=RAIL_TEASER_QUESTION,
-            options=[InputPollOption(text=option) for option in RAIL_TEASER_OPTIONS],
+        poll = await bot.send_poll(channel_id, question=question,
+            options=[InputPollOption(text=option) for option in options],
             is_anonymous=True,
             reply_parameters=ReplyParameters(message_id=message_id, allow_sending_without_reply=False))
     except BaseException as error:
@@ -123,13 +144,15 @@ async def publish_campaign_teaser(db, bot, channel_id, *, series_id, source):
                    'poll_error_class': type(error).__name__}
         await db.set_state(key, json.dumps(receipt, ensure_ascii=False))
         raise
-    receipt = {**prior, 'state': 'sent', 'poll_state': 'sent', 'poll_message_id': poll.message_id}
+    receipt = {**prior, 'state': 'sent', 'poll_state': 'sent', 'poll_message_id': poll.message_id,
+               'completed_at': datetime.now(timezone.utc).isoformat()}
     await db.set_state(key, json.dumps(receipt, ensure_ascii=False))
     return receipt
 
 
 async def publish_raid_announcement(db,bot,channel_id,base_url):
     """One factual channel release; permission failure cannot create duplicate posts."""
+    bot = public_bot(bot)
     from app.crawler_indexing import portal_base
     base=portal_base(base_url)
     description={'updated':False}
@@ -180,6 +203,7 @@ async def publish_raid_announcement(db,bot,channel_id,base_url):
 
 async def publish_featured_review_post(db,bot,channel_id,series_id=5):
     """Feature consented reviews; editorial examples never count as reader ratings."""
+    bot = public_bot(bot)
     series=await db.get_series(series_id)
     if not series:raise ValueError('Новелла не найдена')
     featured=await db.get_featured_reviews(series_id,limit=1)
@@ -233,6 +257,7 @@ async def publish_featured_review_post(db,bot,channel_id,series_id=5):
 
 async def publish_podcast_chapter_drop(db, bot, channel_id, series_id=5, chapter_num=1):
     """A replay-safe public free chapter; an ambiguous send is never retried blindly."""
+    bot = public_bot(bot)
     from app.audiobook import render_chapter_audio, audio_title
     series = await db.get_series(series_id)
     rows = await db.list_chapters(series_id)
@@ -312,6 +337,7 @@ def build_chapter_release_digest(new_series, updated_series, username, channel_u
 
 
 async def _notify_updated_readers(db, bot, series):
+    bot = public_bot(bot)
     from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     summary = {'sent': 0, 'failed': 0}
@@ -348,6 +374,7 @@ async def _notify_updated_readers(db, bot, series):
 
 async def publish_chapter_release_digest(db, bot, channel_id):
     """Post one idempotent release digest, notify existing readers, and refresh pinned #12."""
+    bot = public_bot(bot)
     from app.telegraph_seo import channel_link
     from app.autopilot import build_navigator
     from aiogram.types import LinkPreviewOptions
@@ -409,6 +436,7 @@ async def publish_chapter_release_digest(db, bot, channel_id):
 async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: int | list[int],
                                           updated_series: list[dict], *, milestone: str = '') -> dict:
     """Announce a verified catalog expansion and refresh the existing pinned navigator once."""
+    bot = public_bot(bot)
     from aiogram.exceptions import TelegramBadRequest
     from aiogram.types import LinkPreviewOptions
     from app.autopilot import build_navigator
@@ -483,6 +511,7 @@ async def publish_stage31_catalog_refresh(db, bot, channel_id, new_series_id: in
 
 async def publish_story_poll(db,bot,channel_id,short_id,video_message_id):
     """One native anonymous reply. Never retry a network-ambiguous submission."""
+    bot = public_bot(bot)
     destination=str(channel_id)
     if not await db.claim_story_poll(short_id,destination,video_message_id):
         return await db.story_poll(short_id,destination)
@@ -497,7 +526,22 @@ async def publish_story_poll(db,bot,channel_id,short_id,video_message_id):
     return await db.story_poll(short_id,destination)
 
 
+async def claim_autopilot_short(db, short_id=None):
+    """A one-shot owner selection changes the episode, never its timer or receipts."""
+    if short_id is None:
+        override = await db.get_state('autopilot_next_short_id')
+        if override:
+            if not override.isascii() or not override.isdecimal() or int(override) <= 0:
+                raise ValueError('Некорректный приоритетный Shorts')
+            short_id = int(override)
+            row = await db.get_short(short_id)
+            if not row or row['status'] != 'pending':
+                raise RuntimeError('Приоритетный Shorts не ожидает публикации; требуется сверка')
+    return await db.claim_short(short_id)
+
+
 async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_DIR, min_interval_hours=0):
+    bot = public_bot(bot)
     if not settings.channel_id:
         raise ValueError('CHANNEL_ID обязателен для публикации в обе площадки')
     from app.youtube_uploader import youtube_blocked_until
@@ -525,7 +569,7 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             short['status'] = 'sending'
             short['_previous_status'] = 'pending'
         else:
-            short = await db.claim_short(short_id)
+            short = await claim_autopilot_short(db, short_id)
         if not short:
             return {'status': 'idle'}
         report = {'short_id': short['id'], 'title': short['title']}
@@ -571,6 +615,8 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             report.update(comment_posted=bool(comment.get('comment_posted')),
                           comment_status=comment.get('comment_status','not_attempted'))
             await db.set_state('last_paired_upload', datetime.now(timezone.utc).isoformat())
+            if await db.get_state('autopilot_next_short_id') == str(short['id']):
+                await db.set_state('autopilot_next_short_id', '')
             text = (f"🎬 Опубликован новый Shorts! {report['video_engine']}\n{short['title']}\n\n{report['youtube_url']}\n"
                     f"📢 Telegram channel message_id: {message_id}\n"
                     f"🗳 Опрос: message_id={poll.get('message_id') or 'не подтверждён'} ({poll['state']})\n"
@@ -609,6 +655,7 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
 
 
 async def publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_DIR, min_interval_hours=0):
+    bot = public_bot(bot)
     root = Path(root).resolve()
     cleanup_root = DATA_DIR if root.is_relative_to(DATA_DIR.resolve()) else root
     async with media_slot():

@@ -22,6 +22,7 @@ from app.telegraph_seo import bot_link, publish_series, publish_seo_cluster, seo
 from app.video_gen import generate_promo_video
 from app.retention import send_paywall_followups
 from app.text import split_text
+from app.privacy import public_bot, sanitize_public_text
 
 logger = logging.getLogger(__name__)
 TRAFFIC_DIR = Path("data/traffic_drop")
@@ -76,6 +77,7 @@ async def write_manifest(db: Database, username: str, directory: Path) -> Path:
 
 async def _run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | None = None,
                               output_dir: str | Path = TRAFFIC_DIR) -> dict:
+    bot = public_bot(bot)
     settings = settings or Settings()
     directory = Path(output_dir)
     async with db.autopilot_lock:
@@ -196,6 +198,7 @@ async def _run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | N
 async def run_autopilot_cycle(db: Database, bot: Bot, *, settings: Settings | None = None,
                               output_dir: str | Path = TRAFFIC_DIR) -> dict:
     """Cleanup also runs when startup/network failures escape the inner cycle."""
+    bot = public_bot(bot)
     settings=settings or Settings()
     if settings.cloud_failover_enabled and not settings.autopilot_worker:
         from app.autopilot_process import run_isolated_cycle
@@ -230,6 +233,7 @@ async def refresh_handoff(db, output_dir):
 
 
 async def background_autopilot(db: Database, bot: Bot, settings: Settings) -> None:
+    bot = public_bot(bot)
     if settings.autopilot_interval_hours <= 0:
         return
     while True:
@@ -283,7 +287,7 @@ def build_navigator(series: list[dict], username: str, hubs: list[dict], portal_
     lines.extend(["", "👑 VIP на 7 дней — 49 ⭐️: все главы всех новелл.", "Покупки глав бессрочны; VIP действует 7 дней."])
     for label, hub in zip(("Топ-5 новелл", "Система и попаданцы", "Полный каталог"), hubs):
         lines.append(f"<a href=\"{html.escape(hub['url'], quote=True)}\">🧭 {label}</a>")
-    text = "\n".join(lines)
+    text = sanitize_public_text("\n".join(lines))
     # Telegram limits rendered text after HTML entities are parsed. The URLs in
     # link attributes do not consume the 4096-character message allowance.
     from html.parser import HTMLParser
@@ -326,6 +330,7 @@ def serial_excerpt(text: str) -> str:
 
 async def publish_next_serial(db: Database, bot: Bot, channel_id: str | int, *,
                               min_interval_hours: float = 0) -> dict:
+    bot = public_bot(bot)
     chapter = await db.claim_serial_chapter(channel_id, min_interval_hours)
     if chapter is None:
         return {"status": "idle"}
@@ -354,6 +359,7 @@ async def publish_next_serial(db: Database, bot: Bot, channel_id: str | int, *,
 async def publish_channel_showcase(db: Database, bot: Bot, channel_id: str | int, *,
                                     output_dir: str | Path = TRAFFIC_DIR) -> dict:
     """Publish missing teasers/videos, then create or update one persistently tracked pin."""
+    bot = public_bot(bot)
     async with db.autopilot_lock:
         username = (await bot.get_me()).username
         series = await db.list_series()
