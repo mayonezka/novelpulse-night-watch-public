@@ -270,7 +270,8 @@ def sentence_prefix(text,limit):
     return text[:ends[-1]].rstrip()
 
 
-async def render_standard_audiobook_video(series,chapter,output_path,*,max_duration_seconds=870,mock_tts=False):
+async def render_standard_audiobook_video(series,chapter,output_path,*,max_duration_seconds=870,mock_tts=False,
+                                        excerpt_chars=None):
     """Real measured first-chapter pilot, comfortably below YouTube's 900s limit.
 
     Try the complete first chapter. If necessary reduce the contiguous excerpt at
@@ -279,7 +280,10 @@ async def render_standard_audiobook_video(series,chapter,output_path,*,max_durat
     """
     if not 30<=max_duration_seconds<=890:raise ValueError('Standard edition budget must be 30..890 seconds')
     if chapter['chapter_num']!=1:raise ValueError('Standard pilot requires chapter 1')
-    original=chapter['content_text'].strip();selected=original
+    original=chapter['content_text'].strip()
+    if excerpt_chars is not None and (isinstance(excerpt_chars,bool) or not isinstance(excerpt_chars,int) or excerpt_chars<100):
+        raise ValueError('Excerpt budget must be at least 100 characters')
+    selected=sentence_prefix(original,excerpt_chars) if excerpt_chars is not None else original
     for attempt in range(4):
         full=selected==original
         current={**chapter,'content_text':selected}

@@ -93,7 +93,8 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
             await save(status='rendering')
             if edition=='standard':
                 first=next(c for c in chapters if c['chapter_num']==1)
-                prepared=await render_standard_audiobook_video(series,first,path)
+                render_options={field:plan[field] for field in ('max_duration_seconds','excerpt_chars') if field in plan}
+                prepared=await render_standard_audiobook_video(series,first,path,**render_options)
                 await save(**pilot_metadata(series,edition=edition,full_chapter=prepared['full_chapter']),
                     full_chapter=prepared['full_chapter'],selected_chars=prepared['selected_chars'],
                     source_chars=prepared['source_chars'],duration_budget=prepared['max_duration_seconds'])
@@ -101,6 +102,8 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
             from mutagen.mp4 import MP4
             duration=MP4(path).info.length
             await save(status='rendered',duration_seconds=duration,rendered_bytes=path.stat().st_size)
+            if duration<plan.get('min_duration_seconds',0):
+                raise ValueError('Audiobook is shorter than its approved duration budget')
             if edition=='standard' and duration>=900:raise ValueError('Standard audiobook must be strictly under 15 minutes')
             if duration>900 and not allow_longer_than_15:
                 await save(status='pending',defer_reason='YouTube: uploads over 15 minutes are not enabled')
