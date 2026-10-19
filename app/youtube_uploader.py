@@ -206,6 +206,11 @@ async def audit_existing_audience(page, shorts):
 
 async def upload_in_studio(page, path, short, description, *, timeout_seconds=900, on_submit=None,
                            on_draft=None, on_upload_started=None, draft=None, kind='short'):
+    # Longform uses embedded cover-like frames only. Never invoke a custom
+    # thumbnail picker, feature verification dialog or a separate image upload.
+    if kind == 'long':
+        from app.longform_video import in_frame_longform_metadata
+        short = in_frame_longform_metadata(short)
     short = {**short, 'title': sanitize_public_text(short['title'])}
     description = sanitize_public_text(description)
     assert_public_safe((short['title'], description))

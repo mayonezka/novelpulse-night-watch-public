@@ -54,42 +54,89 @@ async def _run(*args,timeout=180,cwd=None):
     return stdout
 
 
-def _card(series,chapter,path):
-    from PIL import Image,ImageDraw,ImageFont
-    candidates=('C:/Windows/Fonts/arialbd.ttf','C:/Windows/Fonts/segoeuib.ttf',
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf')
-    def font(size):
-        for candidate in candidates:
-            try:return ImageFont.truetype(candidate,size)
-            except OSError:pass
-        return ImageFont.load_default(size=size)
-    image=Image.new('RGB',(1280,720));draw=ImageDraw.Draw(image)
-    for y in range(720):draw.line((0,y,1280,y),fill=(8+int(12*y/720),16+int(12*y/720),28+int(16*y/720)))
-    for radius in (125,190,255):
-        draw.ellipse((950-radius,300-radius,950+radius,300+radius),outline=(26,59,73),width=2)
-    draw.rounded_rectangle((50,35,1230,685),radius=24,outline=(59,109,116),width=2)
-    draw.text((80,65),'NOVELPULSE AUDIO · АУДИОКНИГА',font=font(24),fill='#b9f27c')
-    def wrapped(text,size,width,max_lines):
-        f=font(size);lines=[];line=''
-        for word in text.split():
-            value=(line+' '+word).strip()
-            if draw.textlength(value,font=f)>width and line:lines.append(line);line=word
-            else:line=value
-        if line:lines.append(line)
-        if len(lines)>max_lines:
-            if size>20:return wrapped(text,size-2,width,max_lines)
-            lines=lines[:max_lines];lines[-1]=lines[-1][:60]+'…'
-        return f,lines
-    f,lines=wrapped(str(series['title']),46,1100,3)
-    for i,line in enumerate(lines):draw.text((80,135+i*58),line,font=f,fill='#f6d878',stroke_width=1,stroke_fill='black')
-    draw.text((80,345),series.get('audio_label',f'ГЛАВА {chapter["chapter_num"]} / 2'),font=font(30),fill='#70dcff')
-    f,lines=wrapped(str(chapter['title']),32,1100,2)
-    for i,line in enumerate(lines):draw.text((80,400+i*43),line,font=f,fill='white')
-    draw.rounded_rectangle((78,548,1202,562),radius=7,fill='#243c48')
-    cta, detail = longform_card_cta(series.get('chapter_count',0))
-    draw.text((80,590),cta,font=font(30),fill='#b9f27c')
-    draw.text((80,636),detail,font=font(22),fill='#e3ece9')
-    image.save(path,'PNG')
+LONGFORM_THUMBNAIL_MODE = 'in_frame_only'
+
+
+def in_frame_longform_metadata(metadata):
+    """Drop legacy external-image jobs before they reach the Studio uploader."""
+    external = {'thumbnail_path', 'thumbnail_file', 'thumbnail_url', 'custom_thumbnail',
+                'custom_thumbnail_path', 'upload_thumbnail'}
+    return {**{key:value for key,value in metadata.items() if key not in external},
+            'thumbnail_mode':LONGFORM_THUMBNAIL_MODE}
+
+
+def longform_hook(series):
+    """Short, fixed hooks remain readable in any auto-selected chapter/outro frame."""
+    return {
+        1: 'РАНГ 0: ОШИБКА СИСТЕМЫ',
+        3: 'САД ДАЁТ БЕСКОНЕЧНЫЕ НАГРАДЫ',
+        5: 'РЕЛЬСОТРОН В МИРЕ МАГИИ',
+    }.get(series.get('id'), 'НОВЫЙ МИР НОВАЯ СИЛА')
+
+
+def _card_font(size):
+    from PIL import ImageFont
+    for candidate in ('C:/Windows/Fonts/arialbd.ttf', 'C:/Windows/Fonts/segoeuib.ttf',
+                      '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'):
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            pass
+    return ImageFont.load_default(size=size)
+
+
+def _card_lines(draw, text, size, width, max_lines, *, minimum=20):
+    """Account for ink/stroke bounds, including long Cyrillic words."""
+    for current in range(size, minimum-1, -2):
+        font = _card_font(current)
+        lines, line = [], ''
+        for word in str(text).split():
+            candidate = (line + ' ' + word).strip()
+            if draw.textlength(candidate, font=font) > width and line:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        if line:
+            lines.append(line)
+        if len(lines) <= max_lines and all(draw.textlength(value, font=font) <= width for value in lines):
+            return font, lines
+    raise ValueError('Text cannot fit the audiobook frame')
+
+
+def _card(series, chapter, path):
+    from PIL import ImageDraw
+    from app.longform_art import render_longform_art
+    image = render_longform_art(series.get('id', 0))
+    draw = ImageDraw.Draw(image)
+    # A vector headphone icon avoids missing emoji glyphs on Windows/Linux fonts.
+    draw.rounded_rectangle((48, 34, 445, 103), radius=18, fill='#da163e', outline='#ffdf59', width=3)
+    draw.arc((70, 48, 112, 90), 180, 360, fill='white', width=5)
+    for x in (68, 104):
+        draw.rounded_rectangle((x, 68, x+10, 88), radius=4, fill='white')
+    draw.text((132, 49), 'АУДИОКНИГА', font=_card_font(36), fill='white',
+              stroke_width=2, stroke_fill='#671127')
+    font, lines = _card_lines(draw, str(series['title']), 26, 1130, 2)
+    for index, line in enumerate(lines):
+        draw.text((56, 121+index*32), line, font=font, fill='#f1f5ff', stroke_width=2, stroke_fill='black')
+    font, lines = _card_lines(draw, longform_hook(series), 112, 790, 3, minimum=82)
+    # The fixed title region stays intact in ALL chapter cards and the outro card.
+    line_height = 116
+    top = 204 + (3-len(lines))*36
+    for index, line in enumerate(lines):
+        draw.text((58, top+index*line_height), line, font=font,
+                  fill='#ffdc32' if index < len(lines)-1 else '#ffffff',
+                  stroke_width=7, stroke_fill='#030305')
+    draw.rounded_rectangle((78, 548, 1202, 562), radius=7, fill='#243c48')
+    label = ('ПРОДОЛЖЕНИЕ ИСТОРИИ' if chapter['chapter_num'] == 0 else
+             series.get('audio_label', f'ГЛАВА {chapter["chapter_num"]} · {chapter["title"]}'))
+    font, lines = _card_lines(draw, label, 26, 1120, 1)
+    draw.text((80, 570), lines[0], font=font, fill='#c9e9ff', stroke_width=2, stroke_fill='black')
+    cta, detail = longform_card_cta(series.get('chapter_count', 0))
+    draw.rounded_rectangle((48, 610, 1232, 703), radius=18, fill='#0a101e', outline='#ffd447', width=2)
+    draw.text((72, 622), cta, font=_card_font(28), fill='#ffdf59', stroke_width=1, stroke_fill='black')
+    draw.text((72, 665), detail, font=_card_font(21), fill='white')
+    image.save(path, 'PNG')
 
 
 async def _speech(chapter,path,*,mock_tts=False):

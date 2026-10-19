@@ -8,7 +8,7 @@ from app.scheduling import youtube_blocked_until
 from app.storage_cleanup import media_slot,delete_video
 from app import storage_cleanup
 from app.privacy import anonymous_series_url, sanitize_public_text, assert_public_safe
-from app.longform_video import with_longform_cta
+from app.longform_video import with_longform_cta, in_frame_longform_metadata
 
 
 def publication_key(series_id,*,edition='full'):
@@ -43,8 +43,8 @@ def pilot_metadata(series,*,edition='full',full_chapter=True):
         comment=f'📖 Первые главы бесплатно, продолжение и аудиоглавы: {link}'
     description = with_longform_cta(description)
     assert_public_safe((heading, description, comment))
-    return {'series_id':sid,'title':heading,'description':description,'comment_text':comment,
-            'bot_link':link,'chapters':[1,2] if edition=='full' else [1],'speech_rate':'+8%','format':'1280x720'}
+    return in_frame_longform_metadata({'series_id':sid,'title':heading,'description':description,'comment_text':comment,
+            'bot_link':link,'chapters':[1,2] if edition=='full' else [1],'speech_rate':'+8%','format':'1280x720'})
 
 
 async def plan_longform(db,series_id,*,defer_reason='',edition='full'):
@@ -68,7 +68,7 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
         DailyUploadLimit)
     key=publication_key(series_id,edition=edition)
     async with media_slot():
-        plan=await plan_longform(db,series_id,edition=edition)
+        plan=in_frame_longform_metadata(await plan_longform(db,series_id,edition=edition))
         for field in ('title', 'description', 'comment_text'):
             if field in plan: plan[field] = sanitize_public_text(plan[field])
         if plan['status']=='uploaded':return plan
