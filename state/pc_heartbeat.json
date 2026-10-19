@@ -4,16 +4,16 @@
   "epoch": "a113a041936f45be9031e11f577afa48",
   "heartbeat_interval_seconds": 20,
   "host": "pc",
-  "lease_owner": "pc",
+  "lease_owner": null,
   "lease_ttl_seconds": 45,
   "pc_runtime": {
     "executable": "pythonw.exe",
     "pid": 65856,
     "watchdog_active": true
   },
-  "phase": "active",
+  "phase": "stopped",
   "previous_cloud_epoch": "9a4bdf492c5b4337bf1403b94f8a0dbd",
   "reason": "win32_power_event",
-  "status": "online",
-  "updated_at": "2026-10-19T13:37:56.640158+00:00"
+  "status": "offline",
+  "updated_at": "2026-10-19T13:38:16.643718+00:00"
 }
