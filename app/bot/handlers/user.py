@@ -300,6 +300,14 @@ async def start(message: Message, command: CommandObject, bot: Bot, db: Database
         await show_series(bot, message.chat.id, 1, db)
     elif command.args and re.fullmatch(r"yt_long_s_[1-9][0-9]{0,17}", command.args):
         await show_series(bot, message.chat.id, int(command.args[10:]), db)
+    elif command.args and re.fullmatch(r"web_ch_[1-9][0-9]{0,17}_[1-9][0-9]{0,17}", command.args):
+        _, _, series_id, chapter_num = command.args.split('_')
+        chapters = await db.list_chapters(int(series_id))
+        chapter = next((c for c in chapters if c['chapter_num'] == int(chapter_num)), None)
+        if chapter:
+            await show_chapter(bot, message.chat.id, message.from_user.id, chapter['id'], db)
+        else:
+            await message.answer('Глава пока недоступна. Выберите новеллу в каталоге: /catalog')
     elif command.args and re.fullmatch(r"web_ch_[1-9][0-9]{0,17}", command.args):
         await show_chapter(bot, message.chat.id, message.from_user.id, int(command.args[7:]), db)
     elif command.args and re.fullmatch(r"(?:web_s|rss_s)_[1-9][0-9]{0,17}", command.args):

@@ -31,7 +31,7 @@ h1{font-size:clamp(32px,5vw,64px);line-height:1.15;letter-spacing:-1.5px;margin:
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}.card{padding:30px;border:1px solid #31413c;border-radius:18px;background:linear-gradient(140deg,#1d3029,#10211e);display:flex;flex-direction:column;gap:12px}
 .card h2{font-size:27px;line-height:1.35;margin:6px 0}.card p{font-size:16px;color:var(--muted);margin:0 0 15px}.actions{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:auto;font:14px/1.6 system-ui}
 .cta{display:inline-block;background:var(--green);color:#10200b;padding:12px 19px;border-radius:10px;font:700 14px/1.5 system-ui;text-decoration:none}
-.links{margin:60px 0;padding:30px;border-left:3px solid var(--green);background:var(--card)}.links a{display:block;margin:12px 0;font:16px/1.6 system-ui}
+.cliffhanger-cta{display:block;font-size:22px;padding:25px;background:#ffd45c;color:#161008;border:2px solid #fff1b6;box-shadow:0 0 28px #e9a52e44;margin:24px 0}.links{margin:60px 0;padding:30px;border-left:3px solid var(--green);background:var(--card)}.links a{display:block;margin:12px 0;font:16px/1.6 system-ui}
 .reader{max-width:780px;margin:0 auto 100px}.chapter{padding:35px 0;border-top:1px solid #31413c}.chapter h2{font-size:28px;line-height:1.4}.chapter p{white-space:pre-line;overflow-wrap:anywhere}
 .sticky{position:sticky;bottom:0;background:#14241ef5;border-top:1px solid #476038;padding:16px max(4%,calc((100% - 1120px)/2));display:flex;justify-content:space-between;align-items:center;gap:20px;backdrop-filter:blur(12px);font:14px/1.5 system-ui}
 footer{padding:30px 0;color:var(--muted);font:13px/1.7 system-ui}.description{color:var(--muted)}
@@ -76,6 +76,24 @@ def chapter_body(chapter: dict) -> str:
     if cleaned != first and (not cleaned or cleaned == clean_chapter_title(chapter['chapter_num'], chapter['title'])):
         return ''.join(lines[first_index+1:]).lstrip('\r\n')
     return text
+
+
+def cliffhanger_preview(text: str) -> str:
+    """Keep a contiguous ~60% opening; prefer a tense sentence near the boundary."""
+    target = int(len(text) * .60)
+    if not target:
+        return '…'
+    low = int(len(text) * .54)
+    candidates = list(re.finditer(r'[^.!?\n]+[.!?…]?', text[low:target]))
+    tension = re.compile(r'систем|смерт|кров|таймер|двер|вдруг|не успел|шаг|—|«', re.I)
+    dramatic = [m for m in candidates if tension.search(m.group())]
+    end = low + dramatic[-1].end() if dramatic else target
+    end = min(target, end)
+    prefix = text[:end].rstrip()
+    # Never leave half a word or reveal any text beyond the 60% budget.
+    if end < len(text) and text[end:end+1].isalnum() and prefix[-1:].isalnum():
+        prefix = prefix.rsplit(' ', 1)[0] if ' ' in prefix else ''
+    return prefix.rstrip(' .!?…') + '…'
 
 
 def shell(title: str, description: str, body: str, *, canonical: str, channel_url: str,
@@ -161,13 +179,14 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             chapter=await db.get_chapter(row['id'])
             chapter_name=f"series_{series['id']}_ch_{chapter['chapter_num']}.html"
             chapter_url=urljoin(base,chapter_name)
-            direct=f"https://t.me/{bot_username}?start=web_ch_{chapter['id']}"
+            direct=f"https://t.me/{bot_username}?start=web_ch_{series['id']}_{chapter['chapter_num']}"
             heading=chapter_heading(chapter)
             title=f"{series['title']} — {heading} | Читать и слушать онлайн на русском"
             audio=audio_preview_html(series,chapters,previews,direct,chapter_num=chapter['chapter_num'])
-            full_free = original_full and series['id'] == 1 and chapter['chapter_num'] <= 2
-            excerpt=chapter_body(chapter) if full_free else chapter_body(chapter)[:1200]
-            chapter_description=f"{series['title']} · {heading}. {excerpt[:160]}"
+            free_gate = chapter['chapter_num'] <= min(2, series['free_chapters_limit'])
+            source_body = chapter_body(chapter)
+            excerpt = cliffhanger_preview(source_body) if free_gate else source_body[:1200]
+            chapter_description=f"{series['title']} · {heading}. {source_body[:160]}"
             graph={'@context':'https://schema.org','@graph':[
                 {'@type':'Chapter','@id':chapter_url+'#chapter','url':chapter_url,'name':title,
                  'position':chapter['chapter_num'],'inLanguage':'ru','description':excerpt[:250],
@@ -178,11 +197,13 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
                     {'@type':'ListItem','position':2,'name':series['title'],'item':urljoin(base,filename)},
                     {'@type':'ListItem','position':3,'name':f"Глава {chapter['chapter_num']}",'item':chapter_url}]}]}
             cta=f'<a class="cta" href="{escape(direct)}">📖 Читать продолжение в Telegram-боте (@{escape(bot_username)})</a>'
+            if free_gate:
+                cta=f'<a class="cta cliffhanger-cta" href="{escape(direct)}">🔥 Дочитать главу до конца и включить полную аудиоверсию бесплатно в Telegram-боте (в 1 клик)</a>'
             body=(f'<div class="hero"><div class="eyebrow"><a href="index.html">Библиотека</a> / '
                   f'<a href="{filename}">{escape(series["title"])}</a></div><h1>{escape(heading)}</h1>'
                   f'<p>{escape(series["title"])}</p>{cta}</div>'
                   f'<article class="reader">{audio}<section class="chapter"><p>{escape(excerpt)}</p>' +
-                  ('' if full_free else '<blockquote>…Система скрывает исход этой сцены. Продолжение уже ждёт в боте.</blockquote>') +
+                  '<blockquote>…Что произойдёт дальше? Полная глава уже ждёт в боте.</blockquote>' +
                   f'{cta}<p>🎧 Полная аудиоглава и текст — в Telegram. Первая платная глава: 1 ⭐️; VIP на 24 часа: 19 ⭐️.</p>'
                   '</section></article>')
             (directory/chapter_name).write_text(shell(title,chapter_description,body,canonical=chapter_url if public else '',

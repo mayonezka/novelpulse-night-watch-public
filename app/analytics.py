@@ -39,7 +39,7 @@ def source_title(source: str) -> str:
 
 _CANONICAL_SOURCE_PATTERNS = (
     re.compile(r'(?:series|ch|ref|raid)_[1-9][0-9]{0,17}'),
-    re.compile(r'web_portal:(?:[1-9][0-9]{0,17}|ch_[1-9][0-9]{0,17})'),
+    re.compile(r'web_portal:(?:[1-9][0-9]{0,17}|ch_[1-9][0-9]{0,17}(?:_[1-9][0-9]{0,17})?)'),
     re.compile(r'rss_podcast:[1-9][0-9]{0,17}'),
     re.compile(r'yt_long:[1-9][0-9]{0,17}'),
 )
@@ -50,6 +50,9 @@ def acquisition_source(payload: str | None) -> str:
         return 'direct'
     if is_campaign_source(payload):
         return payload
+    pair = re.fullmatch(r'web_ch_([1-9][0-9]{0,17})_([1-9][0-9]{0,17})', payload)
+    if pair:
+        return f'web_portal:ch_{pair[1]}_{pair[2]}'
     match = re.fullmatch(r'yt_long_s_([1-9][0-9]{0,17})', payload)
     if match:
         return 'yt_long:' + match[1]

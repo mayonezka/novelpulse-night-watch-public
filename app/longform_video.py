@@ -8,6 +8,9 @@ import html
 import re
 from pathlib import Path
 
+LONGFORM_SPOKEN_CTA = 'Продолжение книги и следующие аудиоглавы уже доступны бесплатно. Нажмите на синюю ссылку в первом комментарии под этим видео!'
+LONGFORM_OUTRO_SECONDS = 7.0
+
 LONGFORM_CTA_FIRST_LINE = '👇 КЛИКАБЕЛЬНАЯ ССЫЛКА НА ПРОДОЛЖЕНИЕ — В ПЕРВОМ КОММЕНТАРИИ ПОД ВИДЕО!'
 
 
@@ -101,7 +104,7 @@ async def _speech(chapter,path,*,mock_tts=False):
         return
     import edge_tts
     from app.audiobook import audio_title
-    script=audio_title(chapter)+'.\n\n'+chapter['content_text'].strip()
+    script = chapter['content_text'].strip() if chapter.get('narration_only') else audio_title(chapter)+'.\n\n'+chapter['content_text'].strip()
     chunks=narration_chunks(script)
     if len(chunks)>1:
         # Each bounded request has its own retry and file; a failed later chunk
@@ -173,6 +176,23 @@ async def _render_audiobook_video(series,chapters,output_path,*,mock_tts=False,m
             rendering=asyncio.create_task(asyncio.to_thread(_card,series,chapter,work/f'card_{n}.png'))
             try:await asyncio.shield(rendering)
             except asyncio.CancelledError:await rendering;raise
+        # Reserve seven seconds before enforcing the standard channel's 15-minute cap.
+        outro = {'chapter_num': 0, 'title': 'Продолжение — в первом комментарии',
+                 'content_text': LONGFORM_SPOKEN_CTA, 'narration_only': True}
+        await _speech(outro, work/'outro_raw.mp3', mock_tts=mock_tts)
+        spoken_seconds = MP3(work/'outro_raw.mp3').info.length
+        speed = spoken_seconds / LONGFORM_OUTRO_SECONDS
+        # atempo accepts 0.5..2 per stage; chain bounded stages for any duration.
+        factors = []
+        while speed > 2: factors.append(2.0); speed /= 2
+        while speed < .5: factors.append(.5); speed /= .5
+        factors.append(speed)
+        filters = ','.join(f'atempo={factor:.8f}' for factor in factors)
+        await _run('-y', '-i', work/'outro_raw.mp3', '-af',
+                   filters + ',apad', '-t', str(LONGFORM_OUTRO_SECONDS), work/'audio_0.mp3')
+        _card(series, outro, work/'card_0.png')
+        chapters = [*chapters, outro]
+        durations.append(LONGFORM_OUTRO_SECONDS)
         total=sum(durations);offset=0
         if max_duration_seconds is not None and total>=max_duration_seconds:
             raise DurationLimitExceeded(total)
