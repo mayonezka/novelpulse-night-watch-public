@@ -181,12 +181,14 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
             chapter_url=urljoin(base,chapter_name)
             direct=f"https://t.me/{bot_username}?start=web_ch_{series['id']}_{chapter['chapter_num']}"
             heading=chapter_heading(chapter)
-            title=f"{series['title']} — {heading} | Читать и слушать онлайн на русском"
+            title=f"{series['title']} — {heading} | Читать бесплатно онлайн · Слушать аудиокнигу"
             audio=audio_preview_html(series,chapters,previews,direct,chapter_num=chapter['chapter_num'])
             free_gate = chapter['chapter_num'] <= min(2, series['free_chapters_limit'])
             source_body = chapter_body(chapter)
             excerpt = cliffhanger_preview(source_body) if free_gate else source_body[:1200]
-            chapter_description=f"{series['title']} · {heading}. {source_body[:160]}"
+            chapter_description=(f"{heading} — «{series['title']}»: ЛитРПГ новелла на русском. "
+                "Читать бесплатно онлайн начало главы и слушать аудиокнигу в Telegram. "
+                f"{source_body[:90]}")
             graph={'@context':'https://schema.org','@graph':[
                 {'@type':'Chapter','@id':chapter_url+'#chapter','url':chapter_url,'name':title,
                  'position':chapter['chapter_num'],'inLanguage':'ru','description':excerpt[:250],
@@ -225,7 +227,8 @@ async def generate_web_portal(db: Database, bot_username: str, *, output_dir: st
                    f'Новому читателю первая платная глава — всего 1 ⭐️.</p><a class="cta" href="{link}">Читать дальше в @{escape(bot_username)}</a></div></article>')
         sticky = f'<aside class="sticky"><span>🔥 Первая платная глава — 1 ⭐️<br>👑 VIP на все книги — 49 ⭐️ / 7 дней</span><a class="cta" href="{link}">Открыть продолжение ➡</a></aside>'
         target = directory / filename
-        target.write_text(shell(series['title'] + ' — читать на русском | NovelPulse', series['description'], article,
+        target.write_text(shell(series['title'] + ' | ЛитРПГ новелла — читать бесплатно онлайн и слушать аудиокнигу',
+            f'«{series["title"]}» — ЛитРПГ новелла на русском. Читать бесплатно онлайн первые главы, слушать аудиокнигу и продолжить в Telegram. ' + series['description'][:100], article,
             canonical=urljoin(base, filename) if public else '', channel_url=channel, schema=schema, sticky=sticky), encoding='utf-8')
         files.append(filename)
         iv = f'<a href="{escape(series["telegraph_url"])}">Instant View ↗</a>' if series['telegraph_url'] else ''

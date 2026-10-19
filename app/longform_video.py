@@ -149,6 +149,32 @@ class DurationLimitExceeded(ValueError):
         super().__init__(f'Audiobook exceeds duration budget: {seconds:.3f}s')
 
 
+async def measure_full_chapter_narration(chapters):
+    """Measure real +8% speech without cutting text, rendering video or retaining audio."""
+    import hashlib
+    from mutagen.mp3 import MP3
+    ordered=sorted(chapters,key=lambda c:c['chapter_num'])
+    if [c['chapter_num'] for c in ordered]!=[1,2]:
+        raise ValueError('Full pilot requires complete chapters 1 and 2')
+    rows=[]
+    with tempfile.TemporaryDirectory(prefix='novelpulse-longform-measure-') as folder:
+        for chapter in ordered:
+            if not chapter.get('content_text','').strip():
+                raise ValueError('Empty chapter narration')
+            path=Path(folder)/f'chapter_{chapter["chapter_num"]}.mp3'
+            await _speech(chapter,path)
+            seconds=MP3(path).info.length
+            if seconds<=.25 or seconds>7200:
+                raise ValueError('Invalid measured narration duration')
+            rows.append({'chapter_id':chapter['id'],'chapter_num':chapter['chapter_num'],
+                'chars':len(chapter['content_text']),'duration_seconds':seconds,
+                'source_digest':hashlib.sha256(chapter['content_text'].encode()).hexdigest()})
+    return {'chapters':rows,'speech_rate':'+8%','full_text':True,
+            'outro_seconds':LONGFORM_OUTRO_SECONDS,
+            'duration_seconds':sum(c['duration_seconds'] for c in rows)+LONGFORM_OUTRO_SECONDS,
+            'temporary_audio_deleted':not Path(folder).exists()}
+
+
 async def _render_audiobook_video(series,chapters,output_path,*,mock_tts=False,max_duration_seconds=None):
     """Render validated chapters at 1280x720/12fps, H.264/AAC; caller owns final MP4.
 

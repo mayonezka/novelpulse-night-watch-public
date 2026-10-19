@@ -20,6 +20,10 @@ def pilot_metadata(series,*,edition='full',full_chapter=True):
     sid=series['id']
     title=series['title'].split(' (LitRPG')[0].strip()
     heading=f'«{title}» · Главы 1 и 2 (Полная Аудиокнига) | ЛитРПГ'
+    if len(heading)>100 and ' — ' in title:
+        # Imported catalog titles may include a long descriptive genre suffix.
+        title=title.split(' — ',1)[0].strip()
+        heading=f'«{title}» · Главы 1 и 2 (Полная Аудиокнига) | ЛитРПГ'
     if len(heading)>100:raise ValueError('Audiobook title exceeds YouTube limit')
     link=f'https://t.me/NovelPulseBot?start=yt_long_s_{sid}'
     description=(f'🎧 Полная аудиокнига «{title}» (Главы 1 и 2).\n\n'
