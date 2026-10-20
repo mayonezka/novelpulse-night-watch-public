@@ -71,7 +71,8 @@ def sitemap_html_urls(directory: str | Path, base_url: str) -> list[str]:
 
 
 async def submit_portal_indexnow(db: Database, directory: str | Path, base_url: str, *,
-                                client: httpx.AsyncClient | None = None, wait_seconds: float = 180) -> dict:
+                                client: httpx.AsyncClient | None = None, wait_seconds: float = 180,
+                                force: bool = False) -> dict:
     """Verify the deployed build, then send one batch per engine. Receipt is not indexing."""
     base_url = portal_base(base_url)
     root = Path(directory)
@@ -87,7 +88,7 @@ async def submit_portal_indexnow(db: Database, directory: str | Path, base_url: 
     fingerprint = digest.hexdigest()
     previous = json.loads(await db.get_state(INDEXNOW_STATE) or '{}')
     previous_results = {r['endpoint']: r for r in previous.get('results', [])}
-    old = previous_results if previous.get('digest') == fingerprint else {}
+    old = previous_results if previous.get('digest') == fingerprint and not force else {}
     now = datetime.now(timezone.utc)
     report = {'submitted_at': now.isoformat(), 'base_url': base_url, 'key': key, 'keyLocation': key_location,
               'url_count': len(urls), 'digest': fingerprint, 'results': [], 'status': 'waiting_for_key'}

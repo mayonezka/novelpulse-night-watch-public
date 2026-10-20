@@ -22,8 +22,8 @@ def with_longform_cta(description):
     return LONGFORM_CTA_FIRST_LINE + '\n\n' + body
 
 
-def longform_card_cta(chapter_count=0):
-    chapter_range = f'3–{chapter_count}' if chapter_count >= 3 else '3+'
+def longform_card_cta(chapter_count=0, first_unread=3):
+    chapter_range = f'{first_unread}–{chapter_count}' if chapter_count >= first_unread else f'{first_unread}+'
     return ('ПРОДОЛЖЕНИЕ — В ПЕРВОМ КОММЕНТАРИИ ↓',
             f'Кликабельная ссылка на главы {chapter_range} · Поиск в Telegram: NovelPulseBot')
 
@@ -132,7 +132,7 @@ def _card(series, chapter, path):
              series.get('audio_label', f'ГЛАВА {chapter["chapter_num"]} · {chapter["title"]}'))
     font, lines = _card_lines(draw, label, 26, 1120, 1)
     draw.text((80, 570), lines[0], font=font, fill='#c9e9ff', stroke_width=2, stroke_fill='black')
-    cta, detail = longform_card_cta(series.get('chapter_count', 0))
+    cta, detail = longform_card_cta(series.get('chapter_count', 0),series.get('first_unread',3))
     draw.rounded_rectangle((48, 610, 1232, 703), radius=18, fill='#0a101e', outline='#ffd447', width=2)
     draw.text((72, 622), cta, font=_card_font(28), fill='#ffdf59', stroke_width=1, stroke_fill='black')
     draw.text((72, 665), detail, font=_card_font(21), fill='white')
@@ -301,12 +301,16 @@ async def _render_audiobook_video(series,chapters,output_path,*,mock_tts=False,m
     return target
 
 
-async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,mock_tts=False):
+async def render_longform_audiobook_video(series,chapters_1_and_2,output_path,*,mock_tts=False,chapter_numbers=(1,2)):
     """Existing full two-chapter edition; no abridgement or schedule changes."""
     chapters=sorted(chapters_1_and_2,key=lambda c:c['chapter_num'])
-    if len(chapters)!=2 or [c['chapter_num'] for c in chapters]!=[1,2]:
-        raise ValueError('Longform requires exactly chapters 1 and 2')
-    return await _render_audiobook_video(series,chapters,output_path,mock_tts=mock_tts)
+    expected=list(chapter_numbers)
+    if expected!=[1,2] and not (series.get('id')==1 and expected==[3,4]):
+        raise ValueError('Only original flagship may render Part 2 (chapters 3 and 4)')
+    if len(chapters)!=2 or [c['chapter_num'] for c in chapters]!=expected:
+        raise ValueError('Longform requires exactly the planned consecutive chapters')
+    card={**series,'first_unread':expected[-1]+1}
+    return await _render_audiobook_video(card,chapters,output_path,mock_tts=mock_tts)
 
 
 def sentence_prefix(text,limit):

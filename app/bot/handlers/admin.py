@@ -360,6 +360,13 @@ async def funnel(message: Message, db: Database) -> None:
     await message.answer(funnel_text(await db.funnel_summary()),parse_mode=None)
 
 
+async def weekly(message: Message, db: Database) -> None:
+    from app.weekly import weekly_summary, weekly_text
+    import html
+    text=weekly_text(await weekly_summary(db))
+    await message.answer('<pre>'+html.escape(text)+'</pre>',parse_mode='HTML')
+
+
 async def dashboard(message: Message, bot: Bot, db: Database, settings: Settings) -> None:
     from app.analytics import funnel_text
     summary = await db.dashboard_stats()
@@ -570,6 +577,8 @@ def create_router() -> Router:
     router = Router(name="admin")
     router.message.register(brain_sync, Command('brain_sync', 'ceo_brief'), IsAdmin())
     router.message.register(funnel, Command('funnel'), IsAdmin())
+    router.message.register(weekly, Command('weekly'), IsAdmin())
+    router.message.register(denied, Command('weekly'))
     router.message.register(denied, Command('funnel'))
     router.message.register(denied, Command('brain_sync', 'ceo_brief'))
     router.message.register(stats, Command("stats"), IsAdmin())

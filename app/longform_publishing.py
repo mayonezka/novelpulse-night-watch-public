@@ -12,8 +12,8 @@ from app.longform_video import with_longform_cta, in_frame_longform_metadata
 
 
 def publication_key(series_id,*,edition='full'):
-    if edition not in ('full','standard'):raise ValueError('Unknown audiobook edition')
-    return f'youtube_longform:{series_id}:'+('1-2' if edition=='full' else 'standard')
+    if edition not in ('full','standard','part2'):raise ValueError('Unknown audiobook edition')
+    return f'youtube_longform:{series_id}:'+({'full':'1-2','standard':'standard','part2':'3-4'}[edition])
 
 
 def pilot_metadata(series,*,edition='full',full_chapter=True):
@@ -30,6 +30,12 @@ def pilot_metadata(series,*,edition='full',full_chapter=True):
         '📖 Продолжить чтение и слушать следующие главы без рекламы в Telegram:\n'
         f'👉 {link}\n\n#литрпг #аудиокнига #ранобэ #система')
     comment=f'📖 Продолжение истории: главы 3 и далее — читать и слушать в Telegram: {link}'
+    if edition=='part2':
+        if sid!=1:raise ValueError('Part 2 is reserved for the original NovelPulse flagship')
+        heading=f'«{title}» · Часть 2 · Главы 3–4 | ЛитРПГ аудиокнига'
+        description=(f'🎧 «{title}» — полная озвучка глав 3–4, продолжение истории Артёма.\n\n'
+                     f'📖 Читать и слушать следующие главы: {link}\n\n#литрпг #аудиокнига #система')
+        comment=f'📖 Продолжение истории Артёма и следующие аудиоглавы: {link}'
     if edition=='standard':
         label='Глава 1 целиком' if full_chapter else 'Начало истории · Аудиофрагмент'
         heading=f'Рельсотрон против магии | {label} | ЛитРПГ аудиокнига' if sid==5 else f'{title[:45]} | {label}'
@@ -44,7 +50,7 @@ def pilot_metadata(series,*,edition='full',full_chapter=True):
     description = with_longform_cta(description)
     assert_public_safe((heading, description, comment))
     return in_frame_longform_metadata({'series_id':sid,'title':heading,'description':description,'comment_text':comment,
-            'bot_link':link,'chapters':[1,2] if edition=='full' else [1],'speech_rate':'+8%','format':'1280x720'})
+            'bot_link':link,'chapters':[3,4] if edition=='part2' else [1,2] if edition=='full' else [1],'speech_rate':'+8%','format':'1280x720'})
 
 
 async def plan_longform(db,series_id,*,defer_reason='',edition='full'):
@@ -55,9 +61,20 @@ async def plan_longform(db,series_id,*,defer_reason='',edition='full'):
     if old:return old  # Never downgrade a submitted or published delivery.
     plan={**pilot_metadata(series,edition=edition),'status':'pending','created_at':datetime.now(timezone.utc).isoformat(),
           'defer_reason':defer_reason,'comment_posted':False,'comment_pinned':False,
-          'related_video_set':False}
+          'related_video_set':False,'priority':100 if series_id==1 else 0}
     await db.set_state(key,json.dumps(plan,ensure_ascii=False))
     return plan
+
+
+async def next_longform_plan(db):
+    """Metadata selection only; never render or consume a Shorts pacing slot."""
+    pending=[]
+    for row in await db._all("SELECT key,value FROM app_state WHERE key LIKE 'youtube_longform:%'"):
+        plan=json.loads(row['value'])
+        if plan.get('status')=='pending' and not plan.get('defer_reason'):
+            pending.append({**plan,'state_key':row['key']})
+    return min(pending,key=lambda p:(0 if p.get('series_id')==1 else 1,
+                                     -p.get('priority',0),p.get('created_at',''),p['state_key'])) if pending else None
 
 
 async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15=False,advanced_features=False,
@@ -81,9 +98,10 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
             return {**plan,'needs_reconciliation':True}
         directory=Path(root or storage_cleanup.DATA_DIR/'longform').resolve()
         if not directory.is_relative_to(storage_cleanup.DATA_DIR.resolve()):raise ValueError('Longform media must remain within data/')
-        path=directory/(f'series_{series_id}_standard.mp4' if edition=='standard' else f'series_{series_id}_chapters_1_2.mp4')
+        path=directory/(f'series_{series_id}_standard.mp4' if edition=='standard' else f'series_{series_id}_chapters_'+('_'.join(map(str,plan['chapters'])))+'.mp4')
         series=await db.get_series(series_id)
-        chapters=[await db.get_chapter(c['id']) for c in await db.list_chapters(series_id) if c['chapter_num'] in (1,2)]
+        chapters=[await db.get_chapter(c['id']) for c in await db.list_chapters(series_id) if c['chapter_num'] in plan['chapters']]
+        if len(chapters)!=len(plan['chapters']):raise ValueError('Required audiobook chapters are missing')
         series={**series,'chapter_count':len(await db.list_chapters(series_id))}
         async def save(**values):
             plan.update(values);await db.set_state(key,json.dumps(plan,ensure_ascii=False))
@@ -98,6 +116,7 @@ async def publish_longform_youtube(db,series_id,*,root=None,allow_longer_than_15
                 await save(**pilot_metadata(series,edition=edition,full_chapter=prepared['full_chapter']),
                     full_chapter=prepared['full_chapter'],selected_chars=prepared['selected_chars'],
                     source_chars=prepared['source_chars'],duration_budget=prepared['max_duration_seconds'])
+            elif edition=='part2':await render_longform_audiobook_video(series,chapters,path,chapter_numbers=(3,4))
             else:await render_longform_audiobook_video(series,chapters,path)
             from mutagen.mp4 import MP4
             duration=MP4(path).info.length

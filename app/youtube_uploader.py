@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import os
+import logging
 from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -16,6 +17,8 @@ from playwright.async_api import async_playwright, expect
 CHROME = Path(r'C:\Program Files\Google\Chrome\Application\chrome.exe')
 PROFILE = Path('browser_profiles/youtube').resolve()
 NOT_KIDS = 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
+PUBLICATION_TIMEOUT_SECONDS = 180
+logger=logging.getLogger(__name__)
 UPLOAD_COMPLETE_PATTERN = re.compile(r'(Загрузка(?: видео)? завершена|Upload complete|Проверка завершена|Checks complete|Обработка завершена)', re.I)
 DAILY_LIMIT_PATTERN=re.compile(r'Загрузка недоступна[\s\S]{0,180}24 час|Daily upload limit|upload this video.{0,50}24 hours',re.I)
 from app.scheduling import MAX_YOUTUBE_UPLOADS_PER_24H, youtube_blocked_until
@@ -204,7 +207,56 @@ async def audit_existing_audience(page, shorts):
     return results
 
 
-async def upload_in_studio(page, path, short, description, *, timeout_seconds=900, on_submit=None,
+async def find_existing_studio_video(page, short, draft=None):
+    """Read visible Studio rows before any file transfer; ambiguous matches fail closed."""
+    await page.goto('https://studio.youtube.com', wait_until='domcontentloaded')
+    await page.get_by_role('button', name=re.compile(r'^(Создать|Create)$')).first.wait_for(state='visible')
+    if '/channel/' not in page.url:
+        raise RuntimeError('Studio channel not available')
+    base = page.url.split('/channel/')[0]+'/channel/'+page.url.split('/channel/')[1].split('/')[0]
+    await page.goto(base+'/videos/short',wait_until='domcontentloaded')
+    await page.locator('ytcp-video-row').first.wait_for(state='visible')
+    # Read the full title attribute, not a truncated title or description match.
+    matches = page.locator('ytcp-video-row').filter(has=page.locator(f'a[href*="/video/{draft["video_id"]}/edit"]')) if draft and draft.get('video_id') else None
+    if matches is None or not await matches.count():
+        matches = page.locator('ytcp-video-row').filter(has_text=short['title'])
+    count = await matches.count()
+    if not count:
+        if draft:
+            raise RuntimeError('Saved upload is absent from visible Studio rows; no duplicate transfer allowed')
+        return None
+    if count != 1:
+        raise RuntimeError('Multiple matching Studio videos; no duplicate transfer allowed')
+    row = matches.first
+    status = (await row.inner_text()).replace(short['title'],'')
+    if re.search(r'Черновик|Draft',status):
+        await row.get_by_text(re.compile(r'^(Редактировать черновик|Edit draft)$')).click()
+        link=page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').filter(visible=True).first
+        await link.wait_for(state='visible')
+        url=await link.get_attribute('href')
+        video_id=youtube_video_id(url)
+        phase='draft_uploaded'
+    else:
+        link=row.locator('a[href*="/video/"][href*="/edit"]').first
+        href=await link.get_attribute('href')
+        match=re.search(r'/video/([A-Za-z0-9_-]{11})/edit',href or '')
+        video_id=match[1] if match else None
+        url='https://www.youtube.com/shorts/'+(video_id or '')
+        if not re.search(r'Для всех|Открытый доступ|Public',status) or not re.search(r'Опубликовано|Published',status):
+            raise RuntimeError('Existing video is not public and is not an editable draft')
+        phase='published'
+    if not video_id or (draft and draft.get('video_id') and draft['video_id']!=video_id):
+        raise RuntimeError('Existing Studio video ID mismatch')
+    return {'video_id':video_id,'url':url,'state':'draft' if phase=='draft_uploaded' else 'published','phase':phase}
+
+
+async def upload_in_studio(page, path, short, description, *, timeout_seconds=180, **kwargs):
+    """One wall-clock budget covers all navigation, checks and publication waits."""
+    async with asyncio.timeout(min(PUBLICATION_TIMEOUT_SECONDS, timeout_seconds)):
+        return await _upload_in_studio(page,path,short,description,timeout_seconds=timeout_seconds,**kwargs)
+
+
+async def _upload_in_studio(page, path, short, description, *, timeout_seconds=180, on_submit=None,
                            on_draft=None, on_upload_started=None, draft=None, kind='short'):
     # Longform uses embedded cover-like frames only. Never invoke a custom
     # thumbnail picker, feature verification dialog or a separate image upload.
@@ -271,6 +323,8 @@ async def upload_in_studio(page, path, short, description, *, timeout_seconds=90
     if on_submit:
         await on_submit()  # From here an ambiguous failure MUST NOT trigger a duplicate.
     await page.get_by_role('button', name=re.compile(r'^(Опубликовать|Publish)$')).first.click()
+    # Do not navigate away while Publish is still in flight: that can leave a draft.
+    await page.get_by_text(re.compile(r'^(Видео опубликовано|Video published)$')).filter(visible=True).first.wait_for(state='visible')
     kwargs={'timeout_seconds':timeout_seconds}
     if kind!='short':kwargs['kind']=kind
     return await wait_for_public_video(page, draft_id, short['title'], **kwargs)
@@ -284,7 +338,12 @@ def youtube_video_id(url):
     return value if re.fullmatch(r'[A-Za-z0-9_-]{11}',value) else None
 
 
-async def wait_for_public_video(page, video_id, title='', *, timeout_seconds=900, kind='short'):
+async def wait_for_public_video(page, video_id, title='', *, timeout_seconds=180, kind='short'):
+    async with asyncio.timeout(min(PUBLICATION_TIMEOUT_SECONDS,timeout_seconds)):
+        return await _wait_for_public_video(page,video_id,title,timeout_seconds=timeout_seconds,kind=kind)
+
+
+async def _wait_for_public_video(page, video_id, title='', *, timeout_seconds=180, kind='short'):
     """Poll persisted Studio state; a processing dialog is not a publication receipt."""
     if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
         raise ValueError('Invalid YouTube video ID')
@@ -428,12 +487,14 @@ async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9
         nonlocal upload_started
         upload_started = True
         import json
-        await db.set_state(f'youtube_draft:{short["id"]}', json.dumps({'state': 'upload_started'}))
+        await db.set_state(f'youtube_draft:{short["id"]}', json.dumps({'state': 'upload_started','phase':'rendered'}))
     async def save_draft(value):
         nonlocal draft
-        draft = value
+        draft = {**value,'phase':'draft_uploaded' if value.get('state') in ('draft','submitted') else value.get('phase','rendered')}
         import json
         await db.set_state(f'youtube_draft:{short["id"]}', json.dumps(draft))
+        if value.get('state')=='draft':
+            await db.record_youtube_phase(short['id'],'draft_uploaded',recovered=resume)
     async def mark_submitted():
         nonlocal submitted
         submitted = True
@@ -454,55 +515,75 @@ async def upload_short_youtube(db, *, short_id=None, cdp_url='http://127.0.0.1:9
             previous = [s for s in await db.list_shorts() if s['series_id'] == 1 and s['episode_num'] in (1, 2)] if claimed_short is None else []
             audit = [{'status': 'resume_existing_draft'}] if resume else await audit_existing_audience(page, previous)
             if not resume:
-                import json
                 await db.set_state('youtube_audience_audit', json.dumps(audit))
-            if resume:
-                import json
-                draft = json.loads(await db.get_state(f'youtube_draft:{short_id}') or '{}')
-                short = await db.get_short(short_id)
-                if not draft or draft.get('state') != 'draft' or not short or short['status'] != 'sending':
-                    raise ValueError('Возобновление допускается только для подтверждённого неопубликованного черновика')
-                short['_previous_status'] = 'uploaded' if any(r['short_id'] == short_id for r in await db.short_publications()) else 'pending'
-            else:
-                short = claimed_short or await db.claim_short(short_id, provider='youtube')
+            short = claimed_short or (await db.get_short(short_id) if resume else await db.claim_short(short_id, provider='youtube'))
             if not short:
                 return {'status': 'idle', 'audience_audit': audit}
+            short.setdefault('_previous_status','pending')
+            saved = json.loads(await db.get_state(f'youtube_draft:{short["id"]}') or '{}')
+            if saved.get('video_id') or saved.get('state') in ('draft','submitted','upload_started','published'):
+                draft=saved
+            path=Path(short['video_path']).resolve()
             try:
-                if rendered_path is None:
+                if rendered_path is None and not draft:
                     path = await ensure_short_video(db, short, 'NovelPulseBot', root=root)
-                else:
+                elif rendered_path is not None:
                     from app.autopilot import video_ready
                     path = Path(rendered_path).resolve()
                     if not path.is_relative_to(Path(root).resolve()) or not video_ready(path):
                         raise ValueError('Нет проверенного JIT MP4 для передачи в YouTube')
+                if not draft:
+                    await db.set_state(f'youtube_draft:{short["id"]}',json.dumps({'state':'rendered','phase':'rendered'}))
+                    await db.record_youtube_phase(short['id'],'rendered')
                 from app.config import Settings
                 settings = settings or Settings()
                 series = await db.get_series(short['series_id'])
                 description = sanitize_public_text(short['description']) + '\n\nЧитать продолжение в Telegram: https://t.me/novelpulse_litrpg и в боте https://t.me/NovelPulseBot\n' + anonymous_series_url(series)
-                receipt = await upload_in_studio(page, path, short, description, on_submit=mark_submitted,
-                                                 on_draft=save_draft, on_upload_started=mark_upload_started, draft=draft)
+                async with asyncio.timeout(PUBLICATION_TIMEOUT_SECONDS):
+                    existing=await find_existing_studio_video(page,short,draft)
+                    recovered=existing is not None
+                    resume=resume or recovered
+                    if existing and existing['phase']=='published':
+                        receipt=await wait_for_public_video(page,existing['video_id'],short['title'])
+                    else:
+                        if existing:
+                            draft=existing
+                            await save_draft(existing)
+                        elif draft:
+                            raise RuntimeError('Unconfirmed prior transfer; new file upload forbidden')
+                        receipt = await upload_in_studio(page, path, short, description, on_submit=mark_submitted,
+                                                         on_draft=save_draft, on_upload_started=mark_upload_started, draft=draft)
                 await db.record_short_publication(short['id'], 'youtube', 'studio', receipt['video_id'], finalize=not keep_media)
+                await db.set_state(f'youtube_draft:{short["id"]}',json.dumps({'state':'published','phase':'published',**receipt}))
+                await db.record_youtube_phase(short['id'],'published',recovered=recovered)
                 removed = [] if keep_media else delete_video(path, root=root)
                 comment=await try_first_comment(page,receipt['video_id'],db)
                 return {'status': 'uploaded', 'short_id': short['id'], **receipt, **comment, 'audience_audit': audit,
+                        'recovered_from_draft':recovered,
                         'bytes_deleted': sum(p['bytes'] for p in removed), 'mp4_deleted': sum(p['mp4'] for p in removed)}
             except DailyUploadLimit as error:
+                await db.record_youtube_phase(short['id'],'error',error_class=type(error).__name__)
                 until=(datetime.now(timezone.utc)+timedelta(hours=24)).isoformat()
                 await db.set_state('youtube_upload_blocked_until',until)
                 await db.set_state('youtube_quota_cooldown_until',until)
-                await db.set_state(f'youtube_draft:{short["id"]}',json.dumps({'state':'quota_blocked','retry_after':until}))
+                await db.set_state(f'youtube_draft:{short["id"]}',json.dumps({**(draft or {}),'state':'quota_blocked','retry_after':until}))
                 await db.finish_short(short['id'],'pending')
                 removed=[] if keep_media else delete_video(path,root=root)
                 return {'status':'quota_blocked','short_id':short['id'],'retry_after':until,'error':str(error),
                     'mp4_deleted':sum(p['mp4'] for p in removed)}
             except Exception as error:
+                await db.record_youtube_phase(short['id'],'error',error_class=type(error).__name__)
+                logger.warning('YouTube short_id=%s phase=%s failed: %s',short['id'],
+                               (draft or {}).get('phase','rendered'),type(error).__name__)
                 row = await db.get_short(short['id'])
                 status = ('uploaded' if row['status'] == 'uploaded' else 'uncertain' if submitted
                           else 'sending' if draft or upload_started else short['_previous_status'])
                 if row['status'] != 'uploaded' and status != 'sending':
                     await db.finish_short(short['id'], status)
                 return {'status': 'uncertain' if submitted else 'resume_required' if draft or upload_started else 'failed', 'queue_status': status,
-                        'error': failure_reason(error), 'short_id': short['id'], 'audience_audit': audit}
+                        'error': (f'TimeoutError: публикация превысила {PUBLICATION_TIMEOUT_SECONDS} с; сохранённый черновик требует сверки'
+                                  if isinstance(error,TimeoutError) else failure_reason(error)),
+                        'short_id': short['id'], 'audience_audit': audit}
             # Leaving the context disconnects Playwright; never close the owner's Chrome.
 
 

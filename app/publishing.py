@@ -561,15 +561,18 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
         resume_draft = False
         if short:
             draft = json.loads(await db.get_state(f'youtube_draft:{short["id"]}') or '{}')
-            if draft.get('state') not in ('submitted','draft'):
+            if draft.get('state') not in ('submitted','draft','published','upload_started','rendered'):
                 return {'status': 'needs_review', 'short_id': short['id'], 'error': 'Незавершённый черновик требует сверки/возобновления'}
-            if draft['state'] == 'submitted':
-                await reconcile_youtube_publication(db, short['id'], root=root, manage_slot=False, keep_media=True)
-            resume_draft = draft['state'] == 'draft'
+            resume_draft = draft['state'] in ('submitted','draft','published','upload_started')
             short['status'] = 'sending'
             short['_previous_status'] = 'pending'
         else:
             short = await claim_autopilot_short(db, short_id)
+            if short:
+                # An operator may return a verified unpublished draft to pending.
+                # Resume its existing server ID instead of uploading another copy.
+                saved_draft = json.loads(await db.get_state(f'youtube_draft:{short["id"]}') or '{}')
+                resume_draft = saved_draft.get('state') in ('draft','submitted','published','upload_started')
         if not short:
             return {'status': 'idle'}
         report = {'short_id': short['id'], 'title': short['title']}
@@ -579,9 +582,12 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             youtube = next((r for r in receipts if r['provider'] == 'youtube'), None)
             telegram = next((r for r in receipts if r['provider'] == 'telegram' and r['destination'] == str(settings.channel_id)), None)
             username = (await bot.get_me()).username
-            path = await ensure_short_video(db, short, username, root=root)
-            media_info=json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
-            report['video_engine']=media_info.get('engine','legacy')
+            path = None
+            report['video_engine']='Viral Video Engine 2.0'
+            if not youtube and not resume_draft:
+                path = await ensure_short_video(db, short, username, root=root)
+                media_info=json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+                report['video_engine']=media_info.get('engine','legacy')
             if not youtube:
                 upload = await upload_short_youtube(db, short_id=short['id'], claimed_short=short, root=root,
                     manage_slot=False, keep_media=True, background=True, settings=settings, rendered_path=path,
@@ -595,6 +601,10 @@ async def _publish_short_pair(db, bot, settings, *, short_id=None, root=SHORTS_D
             else:
                 video_id = youtube['remote_id']
             if not telegram:
+                # A server-side draft can finish without a local file. Render only
+                # after YouTube confirmation, for the still-missing Telegram copy.
+                if path is None:
+                    path=await ensure_short_video(db,{**short,'status':'sending'},username,root=root)
                 telegram_started = True
                 message = await bot.send_video(settings.channel_id, FSInputFile(path),
                     caption=short['title'] + '\n\n' + bot_link(username, short['series_id']), parse_mode=None,

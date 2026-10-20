@@ -403,6 +403,17 @@ MIGRATIONS = (
     );
     CREATE INDEX IF NOT EXISTS funnel_event_users ON funnel_events(event_name,tg_id);
     """,
+    """
+    CREATE TABLE IF NOT EXISTS youtube_upload_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        short_id INTEGER NOT NULL REFERENCES shorts_queue(id),
+        phase TEXT NOT NULL CHECK(phase IN ('rendered','draft_uploaded','published','error')),
+        recovered INTEGER NOT NULL DEFAULT 0,
+        error_class TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX IF NOT EXISTS youtube_event_time ON youtube_upload_events(created_at,phase);
+    """,
 )
 
 
@@ -1726,7 +1737,7 @@ class Database:
 
     async def next_short(self) -> dict | None:
         async with self._lock:
-            return await self._one("SELECT * FROM shorts_queue WHERE status = 'pending' ORDER BY episode_num, series_id, id LIMIT 1")
+            return await self._one("SELECT * FROM shorts_queue WHERE status = 'pending' ORDER BY CASE WHEN series_id=1 THEN 0 ELSE 1 END, episode_num, series_id, id LIMIT 1")
 
     async def get_short(self, short_id: int) -> dict | None:
         async with self._lock:
@@ -1746,7 +1757,7 @@ class Database:
                     "AND EXISTS (SELECT 1 FROM short_publications p WHERE p.short_id=s.id AND provider='telegram'))) "
                     "AND (? IS NULL OR id = ?) AND (? IS NULL OR NOT EXISTS "
                     "(SELECT 1 FROM short_publications p WHERE p.short_id=s.id AND p.provider=?)) "
-                    "ORDER BY episode_num, series_id, id LIMIT 1", (provider, short_id, short_id, provider, provider))
+                    "ORDER BY CASE WHEN series_id=1 THEN 0 ELSE 1 END, episode_num, series_id, id LIMIT 1", (provider, short_id, short_id, provider, provider))
                 if row:
                     await self.connection.execute("UPDATE shorts_queue SET status = 'sending' WHERE id = ?", (row['id'],))
                     row['_previous_status'] = row['status']
@@ -1780,6 +1791,14 @@ class Database:
         short = await self.get_short(short_id)
         if Path(short['video_path']).resolve().is_relative_to(DATA_DIR.resolve()):
             delete_video(short['video_path'], root=DATA_DIR)
+
+    async def record_youtube_phase(self, short_id: int, phase: str, *, recovered=False, error_class='') -> None:
+        if phase not in ('rendered','draft_uploaded','published','error'):
+            raise ValueError('Invalid YouTube publication phase')
+        async with self._lock:
+            await self.connection.execute(
+                'INSERT INTO youtube_upload_events(short_id,phase,recovered,error_class) VALUES (?,?,?,?)',
+                (short_id,phase,int(recovered),error_class[:80]))
 
     async def record_short_publication(self, short_id: int, provider: str, destination: str, remote_id: str, *, finalize=True) -> None:
         """Durably commit a verified remote receipt before removing the local asset."""
