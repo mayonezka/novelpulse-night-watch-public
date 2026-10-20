@@ -1,10 +1,10 @@
 {
   "cloud_lease_until": "2026-10-20T15:41:09.923841+00:00",
   "cloud_run_id": "39406206743",
-  "epoch": "ff6d2c1c905846509186a8efee6d7b92",
+  "epoch": "a0b210277644459283324bb2d3f86aa3",
   "heartbeat_interval_seconds": 20,
   "host": "pc",
-  "lease_owner": "cloud",
+  "lease_owner": "pc",
   "lease_ttl_seconds": 45,
   "pc_runtime": {
     "executable": "pythonw.exe",
@@ -12,8 +12,8 @@
     "watchdog_active": true
   },
   "phase": "taking_over",
-  "previous_cloud_epoch": "f11c3f19875b40f1b4c30f72a254d6c0",
+  "previous_cloud_epoch": "ff6d2c1c905846509186a8efee6d7b92",
   "reason": "win32_power_event",
   "status": "online",
-  "updated_at": "2026-10-20T15:38:58.597655+00:00"
+  "updated_at": "2026-10-20T15:40:29.751035+00:00"
 }
