@@ -1,19 +1,19 @@
 {
   "cloud_lease_until": "2026-10-20T19:23:10.333858+00:00",
   "cloud_run_id": "39445990407",
-  "epoch": "24d9f672463145e8a1de3c1d2f87ed4b",
+  "epoch": "b5e8d078b6aa47e099cbcb34076e789d",
   "heartbeat_interval_seconds": 20,
   "host": "pc",
-  "lease_owner": "cloud",
+  "lease_owner": "pc",
   "lease_ttl_seconds": 45,
   "pc_runtime": {
     "executable": "pythonw.exe",
     "pid": 17560,
     "watchdog_active": true
   },
-  "phase": "stopped",
-  "previous_cloud_epoch": "a3fa0693c334413d9788696a88d12cd1",
+  "phase": "taking_over",
+  "previous_cloud_epoch": "24d9f672463145e8a1de3c1d2f87ed4b",
   "reason": "win32_power_event",
-  "status": "offline",
-  "updated_at": "2026-10-20T19:22:20.304194+00:00"
+  "status": "online",
+  "updated_at": "2026-10-20T19:22:31.124341+00:00"
 }
