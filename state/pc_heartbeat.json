@@ -11,9 +11,9 @@
     "pid": 27972,
     "watchdog_active": true
   },
-  "phase": "taking_over",
+  "phase": "active",
   "previous_cloud_epoch": "9c1a018d2ae84360b8a73af3e47f7dfd",
   "reason": "win32_power_event",
   "status": "online",
-  "updated_at": "2026-10-21T09:13:45.205485+00:00"
+  "updated_at": "2026-10-21T09:14:00.784400+00:00"
 }
