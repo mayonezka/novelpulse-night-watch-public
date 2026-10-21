@@ -18,6 +18,8 @@ CHROME = Path(r'C:\Program Files\Google\Chrome\Application\chrome.exe')
 PROFILE = Path('browser_profiles/youtube').resolve()
 NOT_KIDS = 'VIDEO_MADE_FOR_KIDS_NOT_MFK'
 PUBLICATION_TIMEOUT_SECONDS = 180
+CONFIRMATION_TIMEOUT_MS = 90_000
+PUBLICATION_SIGNAL_PATTERN = re.compile(r'(Видео опубликовано|Video published|Обработка|Processing)',re.I)
 logger=logging.getLogger(__name__)
 UPLOAD_COMPLETE_PATTERN = re.compile(r'(Загрузка(?: видео)? завершена|Upload complete|Проверка завершена|Checks complete|Обработка завершена)', re.I)
 DAILY_LIMIT_PATTERN=re.compile(r'Загрузка недоступна[\s\S]{0,180}24 час|Daily upload limit|upload this video.{0,50}24 hours',re.I)
@@ -242,7 +244,7 @@ async def find_existing_studio_video(page, short, draft=None):
         match=re.search(r'/video/([A-Za-z0-9_-]{11})/edit',href or '')
         video_id=match[1] if match else None
         url='https://www.youtube.com/shorts/'+(video_id or '')
-        if not re.search(r'Для всех|Открытый доступ|Public',status) or not re.search(r'Опубликовано|Published',status):
+        if not re.search(r'Для всех|Открытый доступ|Public',status,re.I) or re.search(r'Черновик|Draft|Ограниченный доступ|Private',status,re.I):
             raise RuntimeError('Existing video is not public and is not an editable draft')
         phase='published'
     if not video_id or (draft and draft.get('video_id') and draft['video_id']!=video_id):
@@ -323,11 +325,39 @@ async def _upload_in_studio(page, path, short, description, *, timeout_seconds=1
     if on_submit:
         await on_submit()  # From here an ambiguous failure MUST NOT trigger a duplicate.
     await page.get_by_role('button', name=re.compile(r'^(Опубликовать|Publish)$')).first.click()
-    # Do not navigate away while Publish is still in flight: that can leave a draft.
-    await page.get_by_text(re.compile(r'^(Видео опубликовано|Video published)$')).filter(visible=True).first.wait_for(state='visible')
-    kwargs={'timeout_seconds':timeout_seconds}
-    if kind!='short':kwargs['kind']=kind
-    return await wait_for_public_video(page, draft_id, short['title'], **kwargs)
+    return await wait_for_publication_confirmation(page,draft_id,short['title'],
+                                                  timeout_seconds=timeout_seconds,kind=kind)
+
+
+async def wait_for_publication_confirmation(page,video_id,title='',*,timeout_seconds=180,kind='short'):
+    """Tolerate a missing toast; verify the exact public row in a separate tab.
+
+    Processing text and a saved ID are discovery signals, not public-delivery
+    receipts. Never navigate the upload tab away from an in-flight Publish.
+    """
+    dialog=page.locator('ytcp-uploads-dialog').first
+    tasks=[]
+    try:
+        if await dialog.is_visible():
+            tasks=[asyncio.create_task(page.get_by_text(PUBLICATION_SIGNAL_PATTERN).filter(visible=True).first.wait_for(
+                       state='visible',timeout=CONFIRMATION_TIMEOUT_MS)),
+                   asyncio.create_task(dialog.wait_for(state='hidden',timeout=CONFIRMATION_TIMEOUT_MS))]
+            # Either the broad completion/processing signal or a closed dialog
+            # lets us check persisted visibility. A 90s toast timeout does too.
+            await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            if not task.done():task.cancel()
+        if tasks:await asyncio.gather(*tasks,return_exceptions=True)
+    verification=await page.context.new_page()
+    try:
+        await verification.goto('https://studio.youtube.com',wait_until='domcontentloaded')
+        await verification.get_by_role('button',name=re.compile(r'^(Создать|Create)$')).first.wait_for(state='visible')
+        kwargs={'timeout_seconds':timeout_seconds}
+        if kind!='short':kwargs['kind']=kind
+        return await wait_for_public_video(verification,video_id,title,**kwargs)
+    finally:
+        await verification.close()
 
 
 def youtube_video_id(url):
@@ -359,11 +389,11 @@ async def _wait_for_public_video(page, video_id, title='', *, timeout_seconds=18
             await row.wait_for(state='visible', timeout=5000)
             text = await row.inner_text()
             status = text.replace(title, '') if title else text
-            if (re.search(r'Для всех|Открытый доступ|Public', status)
-                    and re.search(r'Опубликовано|Published', status)
-                    and not re.search(r'Обрабатывается|Обработка|Processing|Uploading|Загрузка', status, re.I)):
+            if (re.search(r'Для всех|Открытый доступ|Public', status,re.I)
+                    and not re.search(r'Черновик|Draft|Ограниченный доступ|Private',status,re.I)):
                 return {'video_id':video_id, 'url':('https://www.youtube.com/shorts/' if kind=='short' else 'https://www.youtube.com/watch?v=')+video_id,
-                        'visibility':'public', 'audience':NOT_KIDS}
+                        'visibility':'public', 'audience':NOT_KIDS,
+                        'processing':bool(re.search(r'Обрабатывается|Обработка|Processing|Uploading|Загрузка',status,re.I))}
         except Exception:
             pass
         await asyncio.sleep(5)
