@@ -234,9 +234,7 @@ async def find_existing_studio_video(page, short, draft=None):
     if re.search(r'Черновик|Draft',status):
         await row.get_by_text(re.compile(r'^(Редактировать черновик|Edit draft)$')).click()
         link=page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').filter(visible=True).first
-        await link.wait_for(state='visible')
-        url=await link.get_attribute('href')
-        video_id=youtube_video_id(url)
+        video_id,url=await studio_video_reference(page,link)
         phase='draft_uploaded'
     else:
         link=row.locator('a[href*="/video/"][href*="/edit"]').first
@@ -279,11 +277,15 @@ async def _upload_in_studio(page, path, short, description, *, timeout_seconds=1
         await chooser.set_input_files(str(path))
     else:
         fields = page.locator('ytcp-social-suggestions-textbox #textbox')
+        # Opening a draft updates the URL before its form is painted. Do not
+        # navigate away merely because the first visibility probe was too early.
+        await fields.nth(0).wait_for(state='visible',timeout=90000)
         current_id = None
         visible_link = page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').filter(visible=True).first
-        if await fields.nth(0).is_visible() and await visible_link.count():
-            current_href = await visible_link.get_attribute('href')
-            current_id = youtube_video_id(current_href)
+        if ('udvid' in parse_qs(urlparse(page.url).query)
+                or re.fullmatch(r'/video/[A-Za-z0-9_-]{11}/edit/?',urlparse(page.url).path)
+                or await fields.nth(0).is_visible()):
+            current_id,_ = await studio_video_reference(page,visible_link)
         if current_id != draft['video_id']:
             await page.goto('https://studio.youtube.com', wait_until='domcontentloaded')
             await page.get_by_role('button', name=re.compile(r'^(Создать|Create)$')).first.wait_for(state='visible')
@@ -300,13 +302,11 @@ async def _upload_in_studio(page, path, short, description, *, timeout_seconds=1
     await select_not_kids(page)
     video_link = page.locator('ytcp-video-info a[href*="youtube"], ytcp-video-info a[href*="youtu.be"]').filter(visible=True).first
     try:
-        await video_link.wait_for(state='visible')
+        draft_id,draft_url=await studio_video_reference(page,video_link)
     except Exception:
         if await page.get_by_text(DAILY_LIMIT_PATTERN).filter(visible=True).count():
             raise DailyUploadLimit('YouTube установил суточный лимит: загрузка доступна после проверки канала владельцем или сброса лимита') from None
         raise
-    draft_url = await video_link.get_attribute('href')
-    draft_id = youtube_video_id(draft_url)
     if not draft_id:
         raise RuntimeError('YouTube не вернул ID черновика')
     if draft and draft_id != draft['video_id']:
@@ -358,6 +358,42 @@ async def wait_for_publication_confirmation(page,video_id,title='',*,timeout_sec
         return await wait_for_public_video(verification,video_id,title,**kwargs)
     finally:
         await verification.close()
+
+
+async def studio_video_reference(page,link):
+    """A draft ID is identity only, never proof of public publication."""
+    parsed=urlparse(page.url)
+    if parsed.scheme=='https' and parsed.hostname=='studio.youtube.com':
+        match=re.fullmatch(r'/video/([A-Za-z0-9_-]{11})/edit/?',parsed.path)
+        value=match[1] if match else parse_qs(parsed.query).get('udvid',[''])[0]
+        if re.fullmatch(r'[A-Za-z0-9_-]{11}',value):
+            return value,'https://www.youtube.com/watch?v='+value
+    try:
+        await link.wait_for(state='visible',timeout=90000)
+        url=await link.get_attribute('href')
+        video_id=youtube_video_id(url)
+        if video_id:return video_id,url
+    except TimeoutError:
+        pass
+    except Exception as error:
+        from playwright.async_api import TimeoutError as PlaywrightTimeout
+        if not isinstance(error,PlaywrightTimeout):raise
+    parsed=urlparse(page.url)
+    if parsed.scheme=='https' and parsed.hostname=='studio.youtube.com':
+        match=re.fullmatch(r'/video/([A-Za-z0-9_-]{11})/edit/?',parsed.path)
+        candidate=match[1] if match else parse_qs(parsed.query).get('udvid',[''])[0]
+        if re.fullmatch(r'[A-Za-z0-9_-]{11}',candidate):
+            return candidate,'https://www.youtube.com/watch?v='+candidate
+    dialogs=page.locator('ytcp-uploads-dialog')
+    ids=set()
+    for dialog in await dialogs.all():
+        if not await dialog.is_visible():continue
+        for attr in ('video-id','data-video-id'):
+            value=await dialog.get_attribute(attr)
+            if value and re.fullmatch(r'[A-Za-z0-9_-]{11}',value):ids.add(value)
+    if len(ids)==1:
+        video_id=ids.pop();return video_id,'https://www.youtube.com/watch?v='+video_id
+    raise RuntimeError('Studio video ID unavailable or ambiguous after 90s; duplicate upload forbidden')
 
 
 def youtube_video_id(url):
